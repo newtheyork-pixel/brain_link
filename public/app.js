@@ -118,10 +118,13 @@ function showConfirm(candidates) {
     box.appendChild(b);
   }
   $('#confirm').hidden = false;
+  $('#cancel').focus();
 }
 
+const closeConfirm = () => { $('#confirm').hidden = true; $('#compose').focus(); };
+
 async function say(text) {
-  $('#confirm').hidden = true;
+  closeConfirm();
   const elapsed = (performance.now() - state.startedAt) / 1000;
   const words = text.trim().split(/\s+/).length;
 
@@ -205,7 +208,12 @@ $('#driver').onchange = (e) => {
 };
 $('#compose').onclick = compose;
 $('#undo').onclick = undo;
-$('#cancel').onclick = () => { $('#confirm').hidden = true; };
+$('#cancel').onclick = closeConfirm;
+// Escape, or clicking the backdrop, always gets him out. Never trap him in a dialog.
+$('#confirm').onclick = (e) => { if (e.target.id === 'confirm') closeConfirm(); };
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#confirm').hidden) closeConfirm();
+});
 $('#partner-said').onchange = () => { if (!state.selected.length) loadTiles(); };
 
 const h = await (await fetch('/api/health')).json();
