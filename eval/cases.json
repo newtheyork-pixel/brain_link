@@ -1,0 +1,23 @@
+[
+  { "id": "recovery",     "partner": "How are you recovering from your illness?", "selected": [] },
+  { "id": "pain-yn",      "partner": "Are you in pain?", "selected": [] },
+  { "id": "need",         "partner": "Do you need anything?", "selected": [] },
+  { "id": "news-job",     "partner": "Michael got the job in Denver.", "selected": [] },
+  { "id": "grad",         "partner": "Emma just graduated!", "selected": [] },
+  { "id": "sleep",        "partner": "Did you sleep okay last night?", "selected": [] },
+  { "id": "visitors",     "partner": "The neighbors want to come visit on Sunday. Should I tell them yes?", "selected": [] },
+  { "id": "doctor",       "partner": "Dr. Reyes wants to try a new medication. What do you think?", "selected": [] },
+  { "id": "tv",           "partner": "Want me to put the game on?", "selected": [] },
+  { "id": "love",         "partner": "I love you, Dad.", "selected": [] },
+  { "id": "food",         "partner": "Are you hungry? I can make you something.", "selected": [] },
+  { "id": "hard-day",     "partner": "You seem down today. What's going on?", "selected": [] },
+  { "id": "worried",      "partner": "Susan is worried about you. She hasn't slept.", "selected": [] },
+  { "id": "cold-open",    "partner": "", "selected": [] },
+
+  { "id": "cont-water",   "partner": "Do you need anything?", "selected": ["water"] },
+  { "id": "cont-pain",    "partner": "Are you in pain?", "selected": ["yes"] },
+  { "id": "cont-emma",    "partner": "Emma just graduated!", "selected": ["proud"] },
+  { "id": "cont-tired",   "partner": "How are you feeling?", "selected": ["tired"] },
+  { "id": "cont-two",     "partner": "Susan is worried about you.", "selected": ["tell", "her"] },
+  { "id": "cont-refuse",  "partner": "Dr. Reyes wants to try a new medication.", "selected": ["no"] }
+]

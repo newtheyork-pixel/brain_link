@@ -21,6 +21,8 @@ const state = {
   driver: 'touch',
   literal: false,
   predictive: true,
+  urgent: false,
+  coreSlots: 2,   // how many tiles never move. Motor learning vs prediction — a measured knob.
   startedAt: null,
   selections: 0,
   profile: null,
@@ -77,12 +79,15 @@ function undo() {
 }
 
 async function loadTiles() {
+  if (state.urgent) return; // he is in the emergency grid; do not yank it away
+
   const res = await fetch('/api/tiles', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       selected: state.selected,
       partner: $('#partner-said').value.trim(),
       predictive: state.predictive,
+      coreSlots: state.coreSlots,
     }),
   });
   const { tiles, source, ms } = await res.json();
@@ -91,6 +96,22 @@ async function loadTiles() {
   $('#m-src').textContent = source === 'predicted' ? `predicted ${ms}ms`
     : source === 'fallback' ? 'model down — fallback tiles' : source;
   renderGrid();
+}
+
+// The escape hatch. One selection, from any screen, no model call, no waiting.
+async function toggleUrgent() {
+  state.urgent = !state.urgent;
+  document.body.classList.toggle('in-urgent', state.urgent);
+  $('#urgent').textContent = state.urgent ? 'Back' : 'Urgent';
+  if (state.urgent) {
+    const { tiles } = await (await fetch('/api/urgent')).json();
+    state.tiles = tiles.slice(0, GRID);
+    state.cursor = 0;
+    $('#m-src').textContent = 'urgent — fixed grid';
+    renderGrid();
+  } else {
+    await loadTiles();
+  }
 }
 
 async function compose() {
@@ -169,7 +190,13 @@ function renderGrid() {
   g.innerHTML = '';
   state.tiles.forEach((t, i) => {
     const b = document.createElement('button');
-    b.className = 'tile' + (state.driver === 'scan' && i === state.cursor ? ' cursor' : '');
+    // Pinned tiles get a quiet marker: they are in the same place every single time,
+    // which is what lets him stop reading the grid and start knowing it.
+    const pinned = !state.urgent && i < state.coreSlots;
+    b.className = 'tile'
+      + (state.driver === 'scan' && i === state.cursor ? ' cursor' : '')
+      + (pinned ? ' pinned' : '')
+      + (state.urgent ? ' urgent-tile' : '');
     b.textContent = t;
     b.onclick = () => pick(t);
     g.appendChild(b);
@@ -208,6 +235,7 @@ $('#driver').onchange = (e) => {
 };
 $('#compose').onclick = compose;
 $('#undo').onclick = undo;
+$('#urgent').onclick = toggleUrgent;
 $('#cancel').onclick = closeConfirm;
 // Escape, or clicking the backdrop, always gets him out. Never trap him in a dialog.
 $('#confirm').onclick = (e) => { if (e.target.id === 'confirm') closeConfirm(); };

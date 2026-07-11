@@ -14,5 +14,12 @@
     "Emma",
     "I love you"
   ],
+
+  "core": ["yes", "no"],
+  "_core": "Pinned to the same two positions in EVERY grid, forever. AAC systems (LAMP, Words for Life) are built on motor learning: a tile that never moves gets memorized, and the user gets faster for years. A fully-reshuffling grid destroys that -- every pick becomes a fresh visual search. coreSlots is a measurable knob: raise it for stability, lower it for prediction. The eval measures the tradeoff instead of guessing it.",
+
+  "urgent": ["PAIN", "can't breathe", "help", "nurse", "bathroom", "too hot", "too cold", "suction"],
+  "_urgent": "Always one selection away, from any screen. If the grid is about Emma's graduation and he suddenly cannot breathe, a predicted grid TRAPS him. No amount of tile quality fixes that. This is a safety requirement, not a feature.",
+
   "_note": "voiceModel: set to voices/ray.onnx once the clone is trained. Until then the app speaks in a stranger's voice and says so."
 }

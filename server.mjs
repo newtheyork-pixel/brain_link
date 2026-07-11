@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { readFile, appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { predictTiles, composeSentence, health } from './lib/llm.mjs';
+import { buildGrid } from './lib/tiles.mjs';
 import { speak } from './lib/voice.mjs';
 
 const PORT = process.env.PORT ?? 8000;
@@ -41,21 +42,34 @@ const routes = {
     catch (e) { json(res, 503, { ok: false, error: String(e.message) }); }
   },
 
-  // The grid. With no selections, static openers (instant — no model wait on tile 1).
-  // After that, the LLM predicts what they need next. This is the contribution.
+  // The grid he sees. core (pinned, never moves) + predicted (the contribution).
   'POST /api/tiles': async (req, res) => {
-    const { selected = [], partner = '', predictive = true } = await body(req);
+    const { selected = [], partner = '', predictive = true, coreSlots = 2 } = await body(req);
+
+    // yes/no are ANSWERS, not continuations. Pin them while he is replying to a question;
+    // free the slots once he is mid-phrase. The eval caught this: after he picked "tired",
+    // the judge marked the pinned yes/no as dead tiles — two of his eight slots, wasted.
+    const answering = selected.length === 0;
+    const slots = answering ? coreSlots : 0;
+    const core = answering ? (profile.core ?? []) : [];
+
     if (!selected.length && !partner) return json(res, 200, { tiles: OPENERS, source: 'openers' });
     if (!predictive) return json(res, 200, { tiles: OPENERS, source: 'static' });
+
     try {
       const t0 = Date.now();
-      const tiles = await predictTiles({ selected, partner, profile });
-      json(res, 200, { tiles, source: 'predicted', ms: Date.now() - t0 });
+      const predicted = await predictTiles({ selected, partner, profile });
+      const tiles = buildGrid({ core, predicted, coreSlots: slots });
+      json(res, 200, { tiles, source: 'predicted', ms: Date.now() - t0, coreSlots: slots });
     } catch (e) {
-      // Never leave a user staring at an empty grid because a model timed out.
+      // Never leave him staring at an empty grid because a model timed out.
       json(res, 200, { tiles: OPENERS, source: 'fallback', error: String(e.message) });
     }
   },
+
+  // Always one selection away, from anywhere. If the grid is about Emma's graduation and
+  // he suddenly can't breathe, a predicted grid traps him. No tile quality fixes that.
+  'GET /api/urgent': async (req, res) => json(res, 200, { tiles: profile.urgent ?? [] }),
 
   'POST /api/compose': async (req, res) => {
     const { selected = [], partner = '', literal = false } = await body(req);

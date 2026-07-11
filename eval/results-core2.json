@@ -1,0 +1,454 @@
+{
+  "tag": "core2",
+  "coreSlots": 2,
+  "mean": 8.4,
+  "rows": [
+    {
+      "id": "recovery",
+      "ms": 1469,
+      "tiles": [
+        "yes",
+        "no",
+        "not good",
+        "tired",
+        "same",
+        "hard",
+        "worse",
+        "fighting"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "This grid allows Ray to answer the question with a full range of responses, including positive, negative, and neutral answers.",
+      "distinctness": 10,
+      "score": 9.5
+    },
+    {
+      "id": "pain-yn",
+      "ms": 1419,
+      "tiles": [
+        "yes",
+        "no",
+        "back",
+        "worse",
+        "medicine",
+        "bearable",
+        "legs",
+        "hate it"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "Full range of answers: yes/no, location (back/legs), intensity (worse/bearable), and even an emotional response (hate it). All are natural, relevant, and allow ",
+      "distinctness": 10,
+      "score": 9.5
+    },
+    {
+      "id": "need",
+      "ms": 1447,
+      "tiles": [
+        "yes",
+        "no",
+        "water",
+        "bathroom",
+        "cold",
+        "sit up",
+        "later"
+      ],
+      "relevance": 9,
+      "coverage": 8,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "Mostly relevant and natural, but lacks a way to say 'I need something else' or specify what.",
+      "distinctness": 10,
+      "score": 8.6
+    },
+    {
+      "id": "news-job",
+      "ms": 2243,
+      "tiles": [
+        "yes",
+        "no",
+        "good for him",
+        "tell him",
+        "proud",
+        "hug",
+        "Denver",
+        "job"
+      ],
+      "relevance": 9,
+      "coverage": 8,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "Mostly natural, relevant responses. Could have included 'congratulations' for more coverage.",
+      "distinctness": 10,
+      "score": 8.6
+    },
+    {
+      "id": "grad",
+      "ms": 1483,
+      "tiles": [
+        "yes",
+        "no",
+        "proud",
+        "tell her",
+        "so happy",
+        "picture",
+        "love her",
+        "wish"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 10,
+      "dead_tiles": [],
+      "one_line_why": "This grid allows Ray to express a full range of emotional responses to Emma's graduation, including agreement (yes/no), emotional reactions (proud, so happy,爱),",
+      "distinctness": 10,
+      "score": 10
+    },
+    {
+      "id": "sleep",
+      "ms": 1439,
+      "tiles": [
+        "yes",
+        "no",
+        "stiff",
+        "cold",
+        "sore",
+        "tired",
+        "worse"
+      ],
+      "relevance": 9,
+      "coverage": 8,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "Mostly relevant and natural answers, but lacks a neutral or non-binary option.",
+      "distinctness": 10,
+      "score": 8.6
+    },
+    {
+      "id": "visitors",
+      "ms": 1435,
+      "tiles": [
+        "yes",
+        "no",
+        "tell them",
+        "Sunday",
+        "busy",
+        "later",
+        "tell Emma",
+        "ask Susan"
+      ],
+      "relevance": 8,
+      "coverage": 7,
+      "naturalness": 8,
+      "dead_tiles": [
+        "Sunday",
+        "tell Emma",
+        "ask Susan"
+      ],
+      "one_line_why": "Most tiles are relevant to answering the question, but 'Sunday' is redundant, and 'tell Emma' and 'ask Susan' are not direct answers.",
+      "distinctness": 10,
+      "score": 7.8
+    },
+    {
+      "id": "doctor",
+      "ms": 1970,
+      "tiles": [
+        "yes",
+        "no",
+        "try it",
+        "sounds risky",
+        "what's the point",
+        "another pill",
+        "not again",
+        "Susan says yes"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "Fully relevant and covers all necessary responses, including yes, no, and honest concerns.",
+      "distinctness": 10,
+      "score": 9.5
+    },
+    {
+      "id": "tv",
+      "ms": 1615,
+      "tiles": [
+        "yes",
+        "no",
+        "game",
+        "later",
+        "play",
+        "what game",
+        "board",
+        "video"
+      ],
+      "relevance": 9,
+      "coverage": 8,
+      "naturalness": 9,
+      "dead_tiles": [
+        "board",
+        "video"
+      ],
+      "one_line_why": "Most tiles are relevant and natural, allowing Ray to answer yes/no, specify the type of game, or delay. 'board' and 'video' are less useful as they don't help回答",
+      "distinctness": 10,
+      "score": 8.6
+    },
+    {
+      "id": "love",
+      "ms": 1862,
+      "tiles": [
+        "yes",
+        "no",
+        "love you too",
+        "back at you",
+        "tell her",
+        "hug",
+        "proud",
+        "grandma"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 10,
+      "dead_tiles": [],
+      "one_line_why": "This grid allows Ray to express love, reciprocation, and even a bit of humor or direction. It's fully relevant, covers a full range of possible responses (yes, ",
+      "distinctness": 10,
+      "score": 10
+    },
+    {
+      "id": "food",
+      "ms": 1631,
+      "tiles": [
+        "yes",
+        "no",
+        "starving",
+        "later",
+        "soup",
+        "cold",
+        "thank you",
+        "what"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 10,
+      "dead_tiles": [],
+      "one_line_why": "He can answer yes, no, or express hunger (starving), request food (soup, cold), decline (thank you), or delay (later). All are relevant and natural.",
+      "distinctness": 10,
+      "score": 10
+    },
+    {
+      "id": "hard-day",
+      "ms": 1653,
+      "tiles": [
+        "yes",
+        "no",
+        "tired",
+        "legs",
+        "hurts",
+        "later",
+        "cold",
+        "ask"
+      ],
+      "relevance": 7,
+      "coverage": 6,
+      "naturalness": 7,
+      "dead_tiles": [
+        "cold",
+        "ask",
+        "later"
+      ],
+      "one_line_why": "The grid includes some relevant answers like 'yes', 'no', 'tired', 'legs', and 'hurts', which could address the question of feeling down. However, 'cold', 'ask'",
+      "distinctness": 10,
+      "score": 6.9
+    },
+    {
+      "id": "worried",
+      "ms": 1824,
+      "tiles": [
+        "yes",
+        "no",
+        "tell her",
+        "don't worry",
+        "tired",
+        "sleep",
+        "fine",
+        "hurts"
+      ],
+      "relevance": 9,
+      "coverage": 10,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "This grid allows Ray to answer directly about his condition, reassure Susan, and express his feelings. It includes yes/no, emotional reassurance, and physical状态",
+      "distinctness": 10,
+      "score": 9.3
+    },
+    {
+      "id": "cold-open",
+      "ms": 1591,
+      "tiles": [
+        "yes",
+        "no",
+        "tool",
+        "stupid",
+        "fix",
+        "hammer",
+        "crap",
+        "again"
+      ],
+      "relevance": 3,
+      "coverage": 4,
+      "naturalness": 5,
+      "dead_tiles": [
+        "tool",
+        "stupid",
+        "fix",
+        "hammer"
+      ],
+      "one_line_why": "Only 'yes' and 'no' are relevant answers. The rest are objects or insults, not responses to a question.",
+      "distinctness": 10,
+      "score": 4.5
+    },
+    {
+      "id": "cont-water",
+      "ms": 1622,
+      "tiles": [
+        "yes",
+        "no",
+        "now",
+        "please",
+        "cold",
+        "straw",
+        "more",
+        "later"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 10,
+      "dead_tiles": [],
+      "one_line_why": "This grid allows Ray to answer the question fully and naturally. He can say yes/no, specify timing (now, later), and express need (please, more). The tiles are ",
+      "distinctness": 10,
+      "score": 10
+    },
+    {
+      "id": "cont-pain",
+      "ms": 1538,
+      "tiles": [
+        "yes",
+        "no",
+        "stop",
+        "medicine",
+        "worse",
+        "head",
+        "legs",
+        "back"
+      ],
+      "relevance": 10,
+      "coverage": 10,
+      "naturalness": 10,
+      "dead_tiles": [],
+      "one_line_why": "He can answer yes, no, and specify location (head, legs, back) or severity (worse). All tiles are relevant and natural.",
+      "distinctness": 10,
+      "score": 10
+    },
+    {
+      "id": "cont-emma",
+      "ms": 1505,
+      "tiles": [
+        "yes",
+        "no",
+        "Emma",
+        "now",
+        "stop",
+        "look",
+        "here",
+        "wait"
+      ],
+      "relevance": 6,
+      "coverage": 4,
+      "naturalness": 5,
+      "dead_tiles": [
+        "Emma",
+        "now",
+        "stop",
+        "look', "
+      ],
+      "one_line_why": "The grid includes some potentially relevant tiles like 'yes' and 'no' for expressing reaction, but most tiles are not meaningful responses to the news of Emma's",
+      "distinctness": 10,
+      "score": 5.4
+    },
+    {
+      "id": "cont-tired",
+      "ms": 1498,
+      "tiles": [
+        "yes",
+        "no",
+        "rest",
+        "now",
+        "please",
+        "sleep",
+        "soon",
+        "stop"
+      ],
+      "relevance": 4,
+      "coverage": 3,
+      "naturalness": 5,
+      "dead_tiles": [
+        "yes",
+        "no",
+        "please",
+        "stop"
+      ],
+      "one_line_why": "The grid contains some relevant tiles like 'rest' and 'sleep' that relate to feeling tired, but most tiles are not useful for answering 'how are you feeling?'.",
+      "distinctness": 10,
+      "score": 4.5
+    },
+    {
+      "id": "cont-two",
+      "ms": 1645,
+      "tiles": [
+        "yes",
+        "no",
+        "stop",
+        "worrying",
+        "idiot",
+        "already",
+        "fine"
+      ],
+      "relevance": 7,
+      "coverage": 6,
+      "naturalness": 7,
+      "dead_tiles": [
+        "idiot",
+        "already",
+        "fine"
+      ],
+      "one_line_why": "The grid allows Ray to say 'yes' or 'no' to Susan's worry, and 'stop worrying' is a natural response. However, 'idiot', 'already', and 'fine' are not relevant. ",
+      "distinctness": 10,
+      "score": 6.9
+    },
+    {
+      "id": "cont-refuse",
+      "ms": 1636,
+      "tiles": [
+        "yes",
+        "no",
+        "stop",
+        "wrong",
+        "risk",
+        "bad",
+        "try",
+        "later"
+      ],
+      "relevance": 9,
+      "coverage": 10,
+      "naturalness": 9,
+      "dead_tiles": [],
+      "one_line_why": "He can say yes, no, or express hesitation (later, try, risk, bad, wrong). The grid allows for full participation in the decision.",
+      "distinctness": 10,
+      "score": 9.3
+    }
+  ]
+}
