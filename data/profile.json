@@ -1,0 +1,18 @@
+{
+  "name": "Ray",
+  "about": "a 68-year-old grandfather with ALS. He can no longer speak. He is fully alert, funny, and impatient with fuss. He was a carpenter for forty years.",
+  "people": ["Emma (granddaughter)", "Susan (wife)", "Michael (son)", "Dr. Reyes"],
+  "voice": "plain, warm, dry humor, short sentences. He never uses two words where one will do.",
+  "voiceModel": null,
+  "openers": [
+    "yes",
+    "no",
+    "water",
+    "pain",
+    "help me",
+    "thank you",
+    "Emma",
+    "I love you"
+  ],
+  "_note": "voiceModel: set to voices/ray.onnx once the clone is trained. Until then the app speaks in a stranger's voice and says so."
+}

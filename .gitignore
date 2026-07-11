@@ -1,0 +1,5 @@
+node_modules/
+voices/cache/
+voices/*.onnx
+data/sessions.jsonl
+.DS_Store

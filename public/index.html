@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StillMe</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="who">
+    <strong id="who-name">—</strong>
+    <span id="voice-state" class="badge warn">placeholder voice</span>
+  </div>
+  <div class="controls">
+    <label class="toggle">
+      <input type="checkbox" id="literal">
+      <span>Literal mode</span>
+    </label>
+    <label class="toggle">
+      <input type="checkbox" id="predictive" checked>
+      <span>Predictive tiles</span>
+    </label>
+    <select id="driver" aria-label="Input method">
+      <option value="touch">Input: Touch</option>
+      <option value="scan">Input: Scanning (EOG)</option>
+    </select>
+  </div>
+</header>
+
+<section class="partner">
+  <label for="partner-said">They said to you</label>
+  <input id="partner-said" type="text" placeholder="e.g. Do you want anything?" autocomplete="off">
+</section>
+
+<section class="utterance" aria-live="polite">
+  <div id="selected" class="chips" role="list"></div>
+  <button id="undo" class="ghost" disabled>Undo</button>
+</section>
+
+<main id="grid" class="grid" role="group" aria-label="Word tiles"></main>
+
+<section class="actions">
+  <button id="compose" class="primary" disabled>Build sentence</button>
+</section>
+
+<!-- Nothing is ever spoken without him choosing it. -->
+<div id="confirm" class="sheet" hidden>
+  <h2>Say which one?</h2>
+  <p class="sheet-note">Nothing is spoken until you pick.</p>
+  <div id="candidates" class="candidates"></div>
+  <button id="cancel" class="ghost">Back</button>
+</div>
+
+<footer id="hud">
+  <span><b id="m-sel">0</b> selections</span>
+  <span><b id="m-time">0.0</b>s</span>
+  <span><b id="m-wpm">—</b> wpm</span>
+  <span id="m-src" class="src"></span>
+</footer>
+
+<div id="scan-help" class="scan-help" hidden>
+  Arrow keys move &middot; Space selects &middot; Backspace undoes
+  <em>— the exact alphabet the EOG board will send</em>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
