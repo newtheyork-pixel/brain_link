@@ -317,7 +317,7 @@ function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {})
 export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProgress }) {
   let landmarker = null, video = null, stream = null, backend = '?';
   let camera = null, irisPx = 0;
-  let running = false;
+  let running = false, calibrating = false, cancelled = false;
   let model = null;                       // the eye→screen map, once calibrated
   let bias = { x: 0, y: 0 };              // constant drift correction, from recenter()
   let median = makeMedian();
@@ -517,8 +517,10 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
      * collected at a DIFFERENT TIME, on a DIFFERENT PATH. That is an honest error. (Randomly
      * splitting one pass would leak: neighbouring frames are near-copies of each other.)
      */
-    async calibrate({ bounds, onSample } = {}) {
-      if (!running) return false;
+    async calibrate({ bounds, onSample, signal } = {}) {
+      if (!running || calibrating) return false;
+      calibrating = true;
+      try {
 
       // Stay inside his working area. The far edges of the glass are where the eyelid swallows the
       // iris, and those samples taught the model nonsense which it then applied everywhere.
@@ -547,13 +549,16 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       const HOLD = 78;          // ms per waypoint — slow enough for the eye to actually keep up
       const SETTLE = 3;         // waypoints to discard after each turn, while the eye catches up
 
+      cancelled = false;
       for (let pass = 0; pass < 2; pass++) {
+        if (cancelled) throw new Error('cancelled');
         const pts = path(pass);
         onCalibrationProgress({ state: 'pursuit', pass, total: 2, x: pts[0][0], y: pts[0][1],
           progress: 0, moveHead: pass === 1 });
         await new Promise((r) => setTimeout(r, pass === 1 ? 3000 : 1400));
 
         for (let i = 0; i < pts.length; i++) {
+          if (cancelled) throw new Error('cancelled');
           const [px, py] = pts[i];
           onCalibrationProgress({ state: 'pursuit', pass, total: 2, x: px, y: py,
             progress: (i + 1) / pts.length });
@@ -608,7 +613,15 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         tile: { w: Math.round(tileW), h: Math.round(tileH) },
       });
       return true;
+      } finally {
+        // Whatever happens — a throw, a cancel, a lost face — the flag comes down. Otherwise a
+        // failed run locks calibration out forever and he can never try again.
+        calibrating = false;
+      }
     },
+
+    get calibrating() { return calibrating; },
+    cancelCalibration() { cancelled = true; },
 
     recalibrate() { model = null; bias = { x: 0, y: 0 }; },
 

@@ -599,7 +599,7 @@ async function startGaze() {
           ? 'Follow the dot — and move your head around as you do.'
           : 'Follow the dot with your eyes. Head still.';
         $('#calib-msg').style.left = '50%';
-        $('#calib-msg').style.top = '92%';
+        $('#calib-msg').style.top = '86%';
         $('#calib-bar').style.width = `${Math.round(((p.pass + p.progress) / p.total) * 100)}%`;
         $('#calib-bar').hidden = false;
         return;
@@ -974,6 +974,7 @@ function clearScreen() {
 
 $('#calibrate').onclick = async () => {
   if (!gaze?.running) return toast('Turn the camera on first.');
+  if (gaze.calibrating) return toast('Calibration is already running. Press Escape to stop it.');
   clearScreen();
   await new Promise((r) => setTimeout(r, 350));   // let the panel finish getting out of the way
 
@@ -991,8 +992,31 @@ $('#calibrate').onclick = async () => {
 
   calibPhase2 = false;
   say('Follow the dot with your eyes. Keep your head still for now.', { instant: true, keep: true });
-  await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
+  try {
+    await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
+  } catch (e) {
+    // A throw used to leave him stranded on a full-screen black overlay with no way out.
+    if (String(e.message) !== 'cancelled') toast(`Calibration failed: ${e.message}`);
+  } finally {
+    endCalibrationUI();
+  }
 };
+
+/** Always get him off the calibration screen. No failure mode leaves him staring at black. */
+function endCalibrationUI() {
+  $('#calib').hidden = true;
+  $('#calib-bar').hidden = true;
+  $('#calib-dot').classList.remove('pursuit', 'sampling');
+  $('#calib-dot').style.display = '';
+  $('#calib-count').textContent = '';
+}
+
+// Escape always aborts. A full-screen overlay with no exit is unacceptable anywhere, and this is
+// a device for someone who cannot ask for help.
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (gaze?.calibrating) { gaze.cancelCalibration(); toast('Calibration stopped.'); }
+});
 $('#test-gaze').onclick = testGazeAccuracy;
 $('#signal-check').onclick = signalCheck;
 $('#recenter').onclick = async () => {
