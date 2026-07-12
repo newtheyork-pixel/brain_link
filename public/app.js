@@ -547,8 +547,14 @@ async function startGaze() {
       d.style.left = `${p.x * 100}%`;
       d.style.top = `${p.y * 100}%`;
       d.classList.toggle('sampling', p.state === 'sampling');
-      $('#calib-msg').textContent = p.state === 'sampling' ? 'Hold it…' : 'Look at the dot';
+
+      const m = $('#calib-msg');
+      m.textContent = p.state === 'sampling' ? 'Hold it…' : 'Look at the dot';
+      // Words ride with the dot. He is looking at a corner; he cannot read the middle.
+      m.style.left = `${Math.min(0.78, Math.max(0.22, p.x)) * 100}%`;
+      m.style.top = `${Math.min(0.86, p.y + 0.12) * 100}%`;
       $('#calib-count').textContent = `${p.index + 1} of ${p.total}`;
+      if (p.state === 'sampling') beep(880, 0.09);
     },
   });
   gaze = g;
@@ -594,25 +600,27 @@ async function signalCheck() {
   };
 
   $('#calib').hidden = false;
-  $('#calib-dot').style.display = 'none';
+  $('#calib-dot').style.display = '';
 
-  $('#calib-msg').textContent = 'Hold still. Look at the middle of the screen.';
-  $('#calib-count').textContent = '1 of 3';
-  await new Promise((r) => setTimeout(r, 1200));
-  const still = await grab(1600);
+  // You cannot read an instruction in the middle of the screen while looking at the far edge of
+  // it. That is the whole point of the test. So the app SAYS it out loud, and the target moves
+  // to where he should be looking — he never has to look away to find out what to do next.
+  const step = async (msg, x, y, settleMs, sampleMs) => {
+    await prompt(msg, x, y);
+    await new Promise((r) => setTimeout(r, settleMs));
+    beep(880);
+    $('#calib-dot').classList.add('sampling');
+    const data = await grab(sampleMs);
+    $('#calib-dot').classList.remove('sampling');
+    beep(660, 0.08);
+    return data;
+  };
 
-  $('#calib-msg').textContent = 'Now look at the FAR LEFT edge — and hold.';
-  $('#calib-count').textContent = '2 of 3';
-  await new Promise((r) => setTimeout(r, 1400));
-  const left = await grab(1200);
-
-  $('#calib-msg').textContent = 'Now the FAR RIGHT edge — and hold.';
-  $('#calib-count').textContent = '3 of 3';
-  await new Promise((r) => setTimeout(r, 1400));
-  const right = await grab(1200);
+  const still = await step('Look at the dot in the middle. Hold still.', 0.5, 0.5, 900, 1600);
+  const left  = await step('Now look at the dot on the far left.',       0.03, 0.5, 1200, 1300);
+  const right = await step('Now the dot on the far right.',              0.97, 0.5, 1200, 1300);
 
   $('#calib').hidden = true;
-  $('#calib-dot').style.display = '';
 
   if (still.length < 10 || left.length < 6 || right.length < 6) {
     return toast('Could not see your face well enough. More light, and sit closer.');
@@ -621,7 +629,6 @@ async function signalCheck() {
   const noise = sdX(still);
   const travel = Math.abs(meanX(right) - meanX(left));
   const snr = travel / (noise || 1e-6);
-
   const verdict = snr > 8 ? 'good' : snr > 4 ? 'usable' : 'too noisy';
   const p = gaze.probe();
   const cam = p.camera ? `${p.camera.w}x${p.camera.h}` : '?';
@@ -629,21 +636,70 @@ async function signalCheck() {
   $('#gaze-state').textContent =
     `${snr.toFixed(1)}x (${verdict}) · travel ${travel.toFixed(3)} / noise ${noise.toFixed(4)} · ${cam}, iris ${p.irisPx}px`;
 
-  // The iris width is the physical limit. Below ~12px the landmark literally cannot tell where
-  // the iris is sitting, and no amount of clever maths downstream recovers it. Say that, rather
-  // than telling him to "recalibrate" at a wall.
-  toast(p.irisPx && p.irisPx < 12
-    ? `Your iris is only ${p.irisPx}px wide — too small to track. Sit closer to the screen.`
+  const verdictMsg = p.irisPx && p.irisPx < 12
+    ? `Your iris is only ${p.irisPx} pixels wide. Sit closer to the screen.`
     : snr > 4
-      ? `Signal ${verdict} (${snr.toFixed(1)}x). Now calibrate.`
-      : `Too noisy (${snr.toFixed(1)}x). Sit closer, put more light on your face, camera at eye level.`);
+      ? `Signal is ${verdict}. Now calibrate.`
+      : `Too noisy. Sit closer, put more light on your face, and raise the camera to eye level.`;
+  toast(`${snr.toFixed(1)}x — ${verdictMsg}`);
+  say(verdictMsg, { instant: true, keep: true });   // he does not have to read it either
 
   fetch('/api/gazelog', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ kind: 'signal', noise: +noise.toFixed(5), travel: +travel.toFixed(4),
-      snr: +snr.toFixed(2), verdict, probe: gaze.probe(),
+      snr: +snr.toFixed(2), verdict, probe: p,
       samples: { still: still.length, left: left.length, right: right.length } }),
   }).catch(() => {});
+}
+
+/** Move the target to where he should look, put the words THERE, and say them aloud. */
+async function prompt(msg, x, y) {
+  const d = $('#calib-dot');
+  d.style.left = `${x * 100}%`;
+  d.style.top = `${y * 100}%`;
+
+  // The words ride WITH the target — never in the middle of the screen when he is looking at
+  // the edge of it. Flip to the inner side near an edge so they stay on screen.
+  const m = $('#calib-msg');
+  m.textContent = msg;
+  m.style.left = `${Math.min(0.78, Math.max(0.22, x)) * 100}%`;
+  m.style.top = `${Math.min(0.86, y + 0.12) * 100}%`;
+
+  speakPrompt(msg);
+  await new Promise((r) => setTimeout(r, 450));
+}
+
+/** Instructions, spoken. This is an app that talks; it should talk to HIM too. */
+let promptPlayer = null;
+async function speakPrompt(text) {
+  try {
+    const res = await fetch('/api/speak', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, voice: 'placeholder' }),
+    });
+    if (!res.ok) return;
+    const url = URL.createObjectURL(await res.blob());
+    promptPlayer?.pause();
+    promptPlayer = new Audio(url);
+    promptPlayer.onended = () => URL.revokeObjectURL(url);
+    await promptPlayer.play().catch(() => {});
+  } catch {}
+}
+
+/** A tone when sampling starts, a lower one when it ends. He needs to know when to hold still. */
+let actx = null;
+function beep(hz = 880, len = 0.12) {
+  try {
+    actx = actx ?? new AudioContext();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.frequency.value = hz;
+    o.type = 'sine';
+    g.gain.setValueAtTime(0.0001, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.15, actx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + len);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + len + 0.02);
+  } catch {}
 }
 
 /**

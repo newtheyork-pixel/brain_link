@@ -185,9 +185,18 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
   0%,100% { box-shadow: 0 0 0 0 rgba(224,179,84,.5); }
   50%     { box-shadow: 0 0 0 16px rgba(224,179,84,0); }
 }
-.calib-msg { color: var(--ink); font-size: 22px; font-weight: 650; margin: 0; }
-.calib-count { color: var(--muted); font-size: 14px; margin: 0;
-  font-variant-numeric: tabular-nums; }
+.calib-msg { position: absolute; transform: translate(-50%, 0); margin: 0;
+  color: var(--ink); font-size: 26px; font-weight: 650; text-align: center;
+  max-width: 60vw; transition: left .35s ease, top .35s ease;
+  text-shadow: 0 2px 12px rgba(0,0,0,.9); }
+.calib-count { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+  color: var(--muted); font-size: 14px; margin: 0; font-variant-numeric: tabular-nums; }
+
+/* The target he is meant to look at. Big, and unmistakable from the corner of an eye —
+   he is looking AT it, so it does not need to be subtle. */
+.calib-dot { width: 30px; height: 30px; margin: -15px 0 0 -15px; }
+.calib-dot::after { content: ""; position: absolute; inset: -14px; border-radius: 50%;
+  border: 2px solid rgba(91,141,239,.4); }
 .settings input[type=range] { width: 110px; accent-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) {
   .calib-dot, .calib-dot.sampling, .gaze-dot { animation: none; transition: none; }
