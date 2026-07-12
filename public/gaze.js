@@ -613,6 +613,25 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     recalibrate() { model = null; bias = { x: 0, y: 0 }; },
 
     /**
+     * ONLINE RE-ANCHORING — the highest-leverage 15 lines in this whole tracker.
+     *
+     * Every confirmed selection is free ground truth: he dwelled inside a tile, so his gaze was
+     * AT that tile. The gap between the tile centre and where the tracker thought he was looking
+     * is the current bias — posture shift, chair moved, headrest adjusted, afternoon light.
+     * Nudge a fraction of it away on every selection and the DC-drift failure class is dead
+     * PERMANENTLY, for any tracker, without him ever recalibrating.
+     *
+     * Clamped per step, so one mis-selection cannot yank the map; α keeps it a follower, not a
+     * twitch.
+     */
+    nudge(dx, dy, alpha = 0.25) {
+      if (!model) return;
+      bias.x += Math.max(-120, Math.min(120, alpha * dx));
+      bias.y += Math.max(-120, Math.min(120, alpha * dy));
+    },
+    get bias() { return { x: Math.round(bias.x), y: Math.round(bias.y) }; },
+
+    /**
      * RECENTER. He has been sitting here for two hours; he has slumped, or shifted, or someone
      * moved his chair. The MAP from eye to screen is still right — it is his whole head that has
      * moved, which shows up as a constant offset. Three seconds looking at one dot fixes that,

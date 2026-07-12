@@ -435,6 +435,7 @@ function stopListening() {
 
 let gaze = null;
 let dwellTile = -1, dwellStart = 0;
+let dwellTrace = [];       // where his gaze actually sat during the dwell — free ground truth
 let calibPhase2 = false;
 
 // TILE HYSTERESIS.
@@ -470,6 +471,7 @@ function tileAt(x, y) {
 function resetDwell() {
   dwellTile = -1;
   dwellStart = 0;
+  dwellTrace = [];
   $$('.tile').forEach((t) => t.style.setProperty('--dwell', '0'));
 }
 
@@ -506,9 +508,19 @@ function onGazePoint(x, y, locked) {
   // happen, which on this device means a word he did not mean, spoken aloud in his voice.
   if (!locked) { dwellStart = performance.now(); return; }
 
+  dwellTrace.push([x, y]);
   const frac = Math.min(1, (performance.now() - dwellStart) / state.dwellMs);
   $$('.tile')[i]?.style.setProperty('--dwell', String(frac));
   if (frac >= 1) {
+    // He just told us where he was looking: the tile he picked. The gap between its centre and
+    // his measured gaze is the CURRENT bias — kill a fraction of it on every selection, and the
+    // slow-drift failure class (slumping, chair moves, light changes) never accumulates.
+    const r = $$('.tile')[i]?.getBoundingClientRect();
+    if (r && dwellTrace.length > 3) {
+      const mx = dwellTrace.reduce((s2, p) => s2 + p[0], 0) / dwellTrace.length;
+      const my = dwellTrace.reduce((s2, p) => s2 + p[1], 0) / dwellTrace.length;
+      gaze?.nudge(r.left + r.width / 2 - mx, r.top + r.height / 2 - my);
+    }
     resetDwell();
     dwellTile = -2;                    // refractory: don't instantly re-fire on the same tile
     bus.emit('SELECT');
@@ -802,9 +814,19 @@ async function testGazeAccuracy() {
       hit: tileAt(mx, my) === i,
       landedOn: tileAt(mx, my),
       offsetPx: Math.round(Math.hypot(mx - cx, my - cy)),
+      mx: Math.round(mx), my: Math.round(my),
+      cx: Math.round(cx), cy: Math.round(cy),
       raw: pts[pts.length - 1].raw,
     });
   }
+
+  // THE PROOF: is the miss a constant bias? Subtract the mean residual and re-score. If this
+  // number is high while the raw score is low, the tracker is fine and only the anchor is off —
+  // which the per-selection nudge now fixes during real use.
+  const withPos = results.filter((r) => r.mx !== undefined);
+  const bdx = withPos.reduce((s2, r) => s2 + (r.cx - r.mx), 0) / (withPos.length || 1);
+  const bdy = withPos.reduce((s2, r) => s2 + (r.cy - r.my), 0) / (withPos.length || 1);
+  const hitsDebiased = withPos.filter((r) => tileAt(r.mx + bdx, r.my + bdy) === r.tile).length;
 
   tiles.forEach((t) => t.classList.remove('target'));
   $('#calib').hidden = true;
@@ -812,8 +834,11 @@ async function testGazeAccuracy() {
 
   const hits = results.filter((r) => r.hit).length;
   const pct = Math.round((hits / results.length) * 100);
-  toast(`Eye tracking hit the right tile ${hits} of ${results.length} times (${pct}%).`);
-  $('#gaze-state').textContent = `Accuracy: ${hits}/${results.length} tiles (${pct}%).`;
+  const msg = `Hit ${hits} of ${results.length}. After bias correction: ${hitsDebiased} of ${withPos.length}.`;
+  toast(msg);
+  say(msg, { instant: true, keep: true });
+  $('#gaze-state').textContent =
+    `Accuracy ${hits}/${results.length} raw · ${hitsDebiased}/${withPos.length} debiased · bias (${Math.round(bdx)}, ${Math.round(bdy)})px`;
 
   // Send it to the server so it can actually be read, instead of living in a toast.
   fetch('/api/gazelog', {
@@ -821,6 +846,7 @@ async function testGazeAccuracy() {
     body: JSON.stringify({
       kind: 'accuracy',
       hits, total: results.length, pct,
+      hitsDebiased, bias: { x: Math.round(bdx), y: Math.round(bdy) },
       screen: { w: window.innerWidth, h: window.innerHeight },
       probe: gaze.probe(),
       results,
@@ -930,9 +956,13 @@ $('#predictive').onchange = (e) => { state.predictive = e.target.checked; loadTi
 $('#driver').onchange = (e) => {
   state.driver = e.target.value;
   $('#scan-help').hidden = state.driver !== 'scan';
+  // Full-bleed: the vertical half-tile is the error budget, and at the default layout it is
+  // 144px (~1.6°) — infeasible for any webcam. Shrinking the chrome raises it ~44%.
+  document.body.classList.toggle('gaze-mode', state.driver === 'gaze');
   if (state.driver === 'gaze') startGaze(); else stopGaze();
   renderGrid();
 };
+$('#gear-float').onclick = () => $('#gear').onclick();
 // Never let him drive with his eyes while a panel is over a third of the tiles.
 bus.on(() => { if (state.driver === 'gaze') clearScreen(); });
 /** Get the settings panel off the screen. It covers the right column of tiles. */

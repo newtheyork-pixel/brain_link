@@ -223,3 +223,23 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
 .calib-track span { display: block; height: 100%; background: var(--accent);
   transition: width .1s linear; }
 .calib-track span[hidden] { display: none; }
+
+/* FULL-BLEED WHEN HIS EYES ARE DRIVING.
+   The math: a 95% hit rate needs 2σ inside the HALF-TILE. At 288px tall, the vertical budget is
+   144px — about 1.6°, which no webcam tracker on earth delivers. Taller tiles are not cosmetic;
+   they are the difference between feasible and impossible on the axis that is always the weakest.
+   So when gaze is the driver, the chrome shrinks and the words take the screen. */
+body.gaze-mode { padding: 8px 10px; gap: 8px; }
+body.gaze-mode header { display: none; }
+body.gaze-mode .partner input { padding: 7px 12px; font-size: 15px; }
+body.gaze-mode button.listen { padding: 7px 14px; font-size: 13px; }
+body.gaze-mode .composing { padding: 8px 12px; }
+body.gaze-mode .composing strong { font-size: 20px; }
+body.gaze-mode .grid { gap: 8px; }
+body.gaze-mode .actions button { padding: 12px; font-size: 17px; }
+/* the gear must stay reachable even with the header gone */
+body.gaze-mode .gear-float { display: flex; }
+.gear-float { display: none; position: fixed; top: 10px; right: 10px; z-index: 6;
+  width: 40px; height: 40px; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+  color: var(--muted); font-size: 17px; cursor: pointer; }
