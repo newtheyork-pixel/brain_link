@@ -9,7 +9,11 @@
 // cannot separate an obviously good grid from an obviously terrible one, the judge is
 // unfit and the eval refuses to report a number.
 
-const HOST = process.env.STILLME_LLM_HOST ?? 'https://llm.thegriffinfund.org';
+// The judge gets its OWN host. It must NOT ride on STILLME_LLM_HOST -- when you point the
+// app at the 4B on localhost to measure it, the judge would follow and try to grade with a
+// 14B that isn't there. The judge should always be the strongest model available, and it
+// must never be the same model it is grading.
+const HOST = process.env.STILLME_JUDGE_HOST ?? 'https://llm.thegriffinfund.org';
 const MODEL = process.env.STILLME_JUDGE_MODEL ?? 'qwen3:14b';
 
 const RUBRIC = {

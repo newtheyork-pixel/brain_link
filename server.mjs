@@ -42,6 +42,20 @@ const routes = {
     catch (e) { json(res, 503, { ok: false, error: String(e.message) }); }
   },
 
+  // Where is the model actually running? Answers the question a judge WILL ask on camera,
+  // and stops you from quietly filming a demo that depends on a tunnel.
+  'GET /api/where': async (req, res) => {
+    const b = await health();
+    json(res, 200, {
+      running_on: b.where,
+      model: b.model,
+      offline: b.offline,
+      note: b.offline
+        ? 'Fully on-device. Pull the network cable and it keeps working.'
+        : 'Remote GPU — best quality, but NOT offline. Switch to on-device before filming.',
+    });
+  },
+
   // The grid he sees. core (pinned, never moves) + predicted (the contribution).
   'POST /api/tiles': async (req, res) => {
     const { selected = [], partner = '', predictive = true, coreSlots = 2 } = await body(req);
