@@ -76,6 +76,7 @@
     <select id="driver">
       <option value="touch">Touch</option>
       <option value="gaze">Eyes (camera)</option>
+      <option value="blink">Blinks (camera)</option>
       <option value="scan">Scanning (switch)</option>
     </select>
   </label>
@@ -113,6 +114,10 @@
   <p id="calib-msg" class="calib-msg">Look at the dot</p>
   <p id="calib-count" class="calib-count"></p>
   <div class="calib-track"><span id="calib-bar" hidden></span></div>
+</div>
+
+<div id="blink-help" class="scan-help" hidden>
+  Blink to move to the next word &middot; hold your eyes shut to pick it
 </div>
 
 <div id="scan-help" class="scan-help" hidden>

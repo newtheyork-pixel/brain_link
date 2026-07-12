@@ -546,6 +546,11 @@ function dwellOverSheet(x, y, locked) {
 
 function onGazePoint(x, y, locked) {
   const dot = $('#gaze-dot');
+
+  // In BLINK mode the cursor is driven by blinks, not by where he looks — so hide the gaze dot
+  // and never let gaze move the cursor, or the two would fight each other.
+  if (state.driver === 'blink') { dot.hidden = true; resetDwell(); return; }
+
   dot.hidden = false;
   dot.style.transform = `translate(${x}px, ${y}px)`;
   dot.classList.toggle('locked', !!locked);   // he can see when the eye has actually landed
@@ -634,16 +639,28 @@ async function startGaze() {
     onBlink: (kind) => {
       if (!$('#calib').hidden) return;                 // never during calibration
 
-      // In the sentence sheet, blinks are the whole interface for a blink-only user:
-      //   quick blink -> next numbered option, held blink -> say the highlighted one.
+      // In the sentence sheet, blinks are the whole interface: quick blink -> next numbered
+      // option, held blink -> say the highlighted one.
       if (!$('#confirm').hidden) {
         if (kind === 'short') sheetNext();
         else if (kind === 'long') sheetConfirm();
         return;
       }
-      // On the tile grid, a blink is a SECOND way to confirm what he is already dwelling on —
-      // never a first (a webcam can't tell a deliberate blink from a reflex, and a reflex must
-      // never fire a word). A held blink confirms; a quick one is ignored here.
+
+      // BLINK DRIVER: he selects entirely by blinking, no gaze pointing required. A quick blink
+      // steps the cursor to the next tile; a held blink selects it. This is single-switch
+      // scanning with the eyelid as the switch — the right fit when gaze can't land reliably but
+      // lid control remains.
+      if (state.driver === 'blink') {
+        if (state.speaking && !state.urgent) return;
+        if (kind === 'short') moveCursor(1);
+        else if (kind === 'long') bus.emit('SELECT');
+        return;
+      }
+
+      // EYES DRIVER: a blink is a SECOND way to confirm what he is already dwelling on — never a
+      // first (a webcam can't tell a deliberate blink from a reflex, and a reflex must never fire
+      // a word). A held blink confirms; a quick one is ignored here.
       if (kind === 'long' && dwellTile >= 0 && !state.speaking) {
         resetDwell();
         bus.emit('SELECT');
@@ -1036,7 +1053,7 @@ function speaking(text) {
 function renderGrid() {
   const g = $('#grid');
   g.innerHTML = '';
-  const aiming = state.driver === 'scan' || state.driver === 'gaze';
+  const aiming = state.driver === 'scan' || state.driver === 'gaze' || state.driver === 'blink';
 
   state.tiles.forEach((t, i) => {
     const b = document.createElement('button');
@@ -1104,16 +1121,19 @@ $('#literal').onchange = (e) => { state.literal = e.target.checked; };
 $('#predictive').onchange = (e) => { state.predictive = e.target.checked; loadTiles(); };
 $('#driver').onchange = (e) => {
   state.driver = e.target.value;
+  const cam = state.driver === 'gaze' || state.driver === 'blink';   // both need the camera
   $('#scan-help').hidden = state.driver !== 'scan';
-  // Full-bleed: the vertical half-tile is the error budget, and at the default layout it is
-  // 144px (~1.6°) — infeasible for any webcam. Shrinking the chrome raises it ~44%.
-  document.body.classList.toggle('gaze-mode', state.driver === 'gaze');
-  if (state.driver === 'gaze') startGaze(); else stopGaze();
+  $('#blink-help').hidden = state.driver !== 'blink';
+  // Full-bleed for both camera drivers: the vertical half-tile is the error budget, and at the
+  // default layout it is 144px (~1.6°) — too tight. Shrinking the chrome raises it ~44%.
+  document.body.classList.toggle('gaze-mode', cam);
+  if (cam) startGaze(); else stopGaze();
+  if (state.driver === 'blink') state.cursor = 0;   // start on the first tile; blinks step from here
   renderGrid();
 };
 $('#gear-float').onclick = () => $('#gear').onclick();
-// Never let him drive with his eyes while a panel is over a third of the tiles.
-bus.on(() => { if (state.driver === 'gaze') clearScreen(); });
+// Never let him drive with the camera while a panel is over a third of the tiles.
+bus.on(() => { if (state.driver === 'gaze' || state.driver === 'blink') clearScreen(); });
 /** Get the settings panel off the screen. It covers the right column of tiles. */
 function clearScreen() {
   $('#settings').hidden = true;
