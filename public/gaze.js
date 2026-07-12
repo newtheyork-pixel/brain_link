@@ -13,11 +13,15 @@
 
 import { FaceLandmarker, FilesetResolver } from '/vendor/vision_bundle.mjs';
 
+// Thirteen, not nine. Nine points to fit a nine-parameter surface is razor thin: one bad dot
+// tips the whole thing. The extras sit at the tile centres, where accuracy actually matters.
 const CAL_POINTS = [
   [0.5, 0.5],                                    // centre first: that is the neutral pose
-  [0.08, 0.10], [0.5, 0.08], [0.92, 0.10],
-  [0.06, 0.5],                [0.94, 0.5],
-  [0.08, 0.90], [0.5, 0.92], [0.92, 0.90],
+  [0.06, 0.08], [0.5, 0.06], [0.94, 0.08],
+  [0.04, 0.5],                [0.96, 0.5],
+  [0.06, 0.92], [0.5, 0.94], [0.94, 0.92],
+  [0.25, 0.30], [0.75, 0.30],                    // where the top row of tiles actually is
+  [0.25, 0.72], [0.75, 0.72],                    // and the bottom row
 ];
 const SAMPLES_PER_POINT = 22;      // ~0.7s of frames
 const SETTLE_MS = 600;             // let the eye actually land before we believe it
@@ -166,51 +170,83 @@ function ridgeSolve(X, t, lambda) {
 
 const dotv = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
 
+/**
+ * I dropped head pose on a hunch and the error got WORSE. So stop hunching.
+ *
+ * When a man looks at the far corner of a laptop screen he TURNS HIS HEAD. His eyes do only part
+ * of the work — which means the iris alone cannot tell you where he is looking, because the same
+ * iris position means different things depending on where the head is pointing. That is why an
+ * iris-only fit could not predict a held-out corner.
+ *
+ * So fit BOTH candidates and let leave-one-out cross-validation pick the winner. The data decides
+ * which features matter, not me. I have now guessed wrong three times; the guessing stops here.
+ */
+const VARIANTS = {
+  // eye-in-head only
+  iris: (p) => [p.ix, p.iy],
+  // eye-in-head + head-in-world: the classic decomposition, and what a person actually does
+  'iris+head': (p) => [p.ix + 0.6 * p.yaw, p.iy + 0.6 * p.pitch, p.ix, p.iy],
+  // head only — the control. If THIS wins, he is aiming with his head and not his eyes at all.
+  head: (p) => [p.yaw, p.pitch],
+};
+
 function buildModel(points) {
-  // Standardise the iris signal. Without this the quadratic terms (x² ~ 0.0001) are a thousand
-  // times smaller than the linear ones, the normal equations are garbage, and the solver answers
-  // with the enormous weights that started this whole mess.
-  const xs = points.map((p) => p.ix), ys = points.map((p) => p.iy);
-  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
-  const sd = (a, m) => Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length) || 1e-4;
-  const mx = mean(xs), my = mean(ys);
-  const sx = sd(xs, mx), sy = sd(ys, my);
-  const feat = (ix, iy) => poly((ix - mx) / sx, (iy - my) / sy);
-
-  const fit = (idx, lambda) => {
-    const X = idx.map((i) => feat(points[i].ix, points[i].iy));
-    return {
-      wx: ridgeSolve(X, idx.map((i) => points[i].x), lambda),
-      wy: ridgeSolve(X, idx.map((i) => points[i].y), lambda),
-    };
-  };
-
   const all = points.map((_, i) => i);
+  let best = null;
+  const looByVariant = {};
 
-  // LEAVE-ONE-OUT: the only honest error. Fit on the rest, predict the one held out. Also picks
-  // the ridge strength — too little and it overfits nine noisy points; too much and it flattens
-  // into a blob in the middle of the screen.
-  let best = { lambda: 0.1, err: Infinity };
-  for (const lambda of [0.01, 0.03, 0.1, 0.3, 1, 3, 10]) {
-    let err = 0;
-    for (let k = 0; k < points.length; k++) {
-      const m = fit(all.filter((i) => i !== k), lambda);
-      const f = feat(points[k].ix, points[k].iy);
-      err += Math.hypot(dotv(m.wx, f) - points[k].x, dotv(m.wy, f) - points[k].y);
+  for (const [name, extract] of Object.entries(VARIANTS)) {
+    const raw = points.map(extract);
+    const dim = raw[0].length;
+
+    // Standardise. Without this the quadratic terms are orders of magnitude smaller than the
+    // linear ones, the normal equations are garbage, and the solver answers with the twenty
+    // thousand pixel weights that started this whole mess.
+    const mu = [], sg = [];
+    for (let k = 0; k < dim; k++) {
+      const col = raw.map((v) => v[k]);
+      const m = col.reduce((s, v) => s + v, 0) / col.length;
+      mu.push(m);
+      sg.push(Math.sqrt(col.reduce((s, v) => s + (v - m) ** 2, 0) / col.length) || 1e-4);
     }
-    err /= points.length;
-    if (err < best.err) best = { lambda, err };
+    const feat = (v) => {
+      const z = v.map((x, k) => (x - mu[k]) / sg[k]);
+      // Quadratic in the first two dimensions (gaze-to-screen is mildly curved); linear in the
+      // rest. Nine points cannot support a full quadratic in four variables.
+      return [1, ...z, z[0] * z[0], z[1] * z[1], z[0] * z[1]];
+    };
+
+    const fit = (idx, lambda) => {
+      const X = idx.map((i) => feat(raw[i]));
+      return {
+        wx: ridgeSolve(X, idx.map((i) => points[i].x), lambda),
+        wy: ridgeSolve(X, idx.map((i) => points[i].y), lambda),
+      };
+    };
+
+    for (const lambda of [0.01, 0.03, 0.1, 0.3, 1, 3, 10]) {
+      let err = 0;
+      for (let k = 0; k < points.length; k++) {
+        const m = fit(all.filter((i) => i !== k), lambda);
+        const f = feat(raw[k]);
+        err += Math.hypot(dotv(m.wx, f) - points[k].x, dotv(m.wy, f) - points[k].y);
+      }
+      err /= points.length;
+      if (!looByVariant[name] || err < looByVariant[name]) looByVariant[name] = Math.round(err);
+      if (!best || err < best.err) best = { err, lambda, name, extract, feat, fit };
+    }
   }
 
-  const m = fit(all, best.lambda);
+  const m = best.fit(all, best.lambda);
 
   return {
     looErrorPx: Math.round(best.err),
     lambda: best.lambda,
+    variant: best.name,
+    looByVariant,
     weightMax: Math.round(Math.max(...m.wx.map(Math.abs), ...m.wy.map(Math.abs))),
-    predict(ix, iy) {
-      const f = feat(ix, iy);
-      // Clamp: a quadratic surface can still shoot off past the calibrated range.
+    predict(p) {
+      const f = best.feat(best.extract(p));
       return [
         Math.max(0, Math.min(window.innerWidth, dotv(m.wx, f))),
         Math.max(0, Math.min(window.innerHeight, dotv(m.wy, f))),
@@ -399,7 +435,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    const [rx, ry] = model.predict(f.v[0], f.v[1]);   // iris only — a shrug must not hijack it
+    const [rx, ry] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3] });
 
     const now = performance.now();
     const [mx, my] = median(rx, ry);
@@ -497,7 +533,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
           med.push(col[Math.floor(col.length / 2)]);
         }
         points.push({
-          ix: med[0], iy: med[1],
+          ix: med[0], iy: med[1], yaw: med[2], pitch: med[3],
           x: px * window.innerWidth, y: py * window.innerHeight,
           n: keep.length,
         });
@@ -518,8 +554,16 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       onCalibrationProgress({
         state: 'done', errorPx, usable, backend,
         lambda: model.lambda, weightMax: model.weightMax,
+        variant: model.variant, looByVariant: model.looByVariant,
         tile: { w: Math.round(tileW), h: Math.round(tileH) },
         samples: points.reduce((a, p) => a + p.n, 0),
+        // The nine points themselves. Without these I am guessing at the shape of a signal I
+        // cannot see — and I have now guessed wrong three times.
+        points: points.map((p) => ({
+          x: Math.round(p.x), y: Math.round(p.y),
+          ix: +p.ix.toFixed(4), iy: +p.iy.toFixed(4),
+          yaw: +p.yaw.toFixed(4), pitch: +p.pitch.toFixed(4),
+        })),
       });
       return true;
     },

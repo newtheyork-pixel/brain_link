@@ -534,8 +534,11 @@ async function startGaze() {
         $('#calib').hidden = true;
         // The leave-one-out error, against half a tile. Anything worse and the wrong word gets
         // spoken in his voice — so say so, instead of congratulating him on a broken fit.
+        // Which model won, and what each scored. If "head" wins, he is aiming with his head and
+        // not his eyes — and that is a fact about him, not a bug to hide.
+        const by = Object.entries(p.looByVariant ?? {}).map(([k, v]) => `${k} ${v}px`).join(' · ');
         $('#gaze-state').textContent =
-          `±${p.errorPx}px (tile is ${p.tile.w}x${p.tile.h}) · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+          `±${p.errorPx}px using ${p.variant} (tile ${p.tile.w}x${p.tile.h}) · ${p.usable ? 'usable' : 'TOO LOOSE'}\n${by}`;
         const msg = p.usable
           ? `Calibrated to about ${p.errorPx} pixels. Now run the test.`
           : `Calibration is too loose: ${p.errorPx} pixels, and a tile is only ${p.tile.w} wide. Sit still, keep your head steady, and calibrate again.`;
