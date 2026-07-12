@@ -532,9 +532,15 @@ async function startGaze() {
     onCalibrationProgress: (p) => {
       if (p.state === 'done') {
         $('#calib').hidden = true;
-        $('#gaze-state').textContent = `Calibrated (±${p.errorPx}px, p90 ${p.p90Px}px).`;
-        if (p.errorPx > 180) toast('Calibration is rough — sit still, get more light, try again.');
-        else toast(`Calibrated (±${p.errorPx}px). Now run Test accuracy.`);
+        // The leave-one-out error, against half a tile. Anything worse and the wrong word gets
+        // spoken in his voice — so say so, instead of congratulating him on a broken fit.
+        $('#gaze-state').textContent =
+          `±${p.errorPx}px (tile is ${p.tile.w}x${p.tile.h}) · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+        const msg = p.usable
+          ? `Calibrated to about ${p.errorPx} pixels. Now run the test.`
+          : `Calibration is too loose: ${p.errorPx} pixels, and a tile is only ${p.tile.w} wide. Sit still, keep your head steady, and calibrate again.`;
+        toast(msg);
+        say(msg, { instant: true, keep: true });
         fetch('/api/gazelog', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ kind: 'calibration', ...p,

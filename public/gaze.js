@@ -105,69 +105,116 @@ function features(lm, face, matrix) {
 }
 
 /**
- * WHY THE DOT FLEW AROUND WHILE HIS EYES WERE STILL.
+ * THE MODEL. Third attempt, and this time the error it reports is a real one.
  *
- * I fitted a least-squares LINE from eye-features to screen pixels. With seven near-collinear
- * features the normal equations are badly conditioned, and the solver answers with ENORMOUS
- * weights — thousands of pixels per unit of feature. The iris landmark wobbles by a fraction of
- * a percent between frames (it always does), that wobble gets multiplied by a huge weight, and
- * the dot leaps across the screen while the man sits perfectly still.
+ * Attempt 1 — least squares on 7 collinear features, no standardisation. Produced weights of
+ * TWENTY THOUSAND pixels per unit. A 0.3% iris wobble became 60px of jitter. An amplifier.
  *
- * I built an amplifier and called it a tracker.
+ * Attempt 2 — inverse-distance interpolation between 9 calibration centroids. Bounded, so it
+ * stopped flying off screen. But it reported a 5-pixel calibration error, which was a LIE: the
+ * weight at zero distance is enormous, so each point trivially reproduced ITSELF. It was
+ * grading its own homework with the answers in front of it. And because every feature was
+ * standardised to equal weight, HEAD POSE counted as much as iris position — so "where is he
+ * looking" was decided partly by how he was holding his head.
  *
- * So: no regression. INTERPOLATE INSTEAD.
+ * Attempt 3 — what actually works, and what real webcam trackers do:
  *
- * Calibration stores, for each of the nine dots, the average eye-feature vector while he looked
- * at it. At runtime we ask: which of those nine does the eye look most like right now? The
- * answer is a weighted blend of the nine screen positions — so the output is ALWAYS inside the
- * region he calibrated. It cannot extrapolate. It cannot amplify. A small wobble in the iris
- * makes a small wobble in the blend, and nothing else.
- *
- * (Shepard / inverse-distance interpolation, in a feature space standardised so that a
- * millimetre of iris and a degree of head-turn count the same.)
+ *   - IRIS ONLY drives the mapping. He sits at a laptop; his head is roughly fixed. Letting head
+ *     pose into the model just lets a shrug hijack the estimate.
+ *   - A quadratic surface (1, x, y, x², y², xy). Gaze-to-screen is mildly curved; a plane can't
+ *     fit the corners.
+ *   - Features STANDARDISED before solving, and a ridge scaled to the data. This is exactly what
+ *     was missing in attempt 1 — it is why the weights exploded.
+ *   - The reported error is LEAVE-ONE-OUT: fit on 8 points, predict the 9th, and measure that.
+ *     A model cannot cheat on a point it has never seen. THIS is the number that tells the truth.
  */
-function buildModel(points) {
-  const dim = points[0].mean.length;
 
-  // Standardise: without this, head-yaw (radians, ~0.3) would drown iris position (~0.05), and
-  // the "nearest" calibration point would be decided almost entirely by how he held his head.
-  const mu = new Float64Array(dim);
-  const sd = new Float64Array(dim);
-  for (const p of points) for (let i = 0; i < dim; i++) mu[i] += p.mean[i] / points.length;
-  for (const p of points) {
-    for (let i = 0; i < dim; i++) sd[i] += (p.mean[i] - mu[i]) ** 2 / points.length;
+const poly = (ix, iy) => [1, ix, iy, ix * ix, iy * iy, ix * iy];
+
+function ridgeSolve(X, t, lambda) {
+  const n = X[0].length;
+  const A = Array.from({ length: n }, () => new Float64Array(n));
+  const b = new Float64Array(n);
+  for (let r = 0; r < X.length; r++) {
+    for (let i = 0; i < n; i++) {
+      b[i] += X[r][i] * t[r];
+      for (let j = 0; j < n; j++) A[i][j] += X[r][i] * X[r][j];
+    }
   }
-  for (let i = 0; i < dim; i++) sd[i] = Math.sqrt(sd[i]) || 1e-3;
+  for (let i = 1; i < n; i++) A[i][i] += lambda;   // never penalise the intercept
 
-  const z = (v) => v.map((x, i) => (x - mu[i]) / sd[i]);
-  const centroids = points.map((p) => ({ z: z(p.mean), x: p.x, y: p.y }));
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]];
+    [b[c], b[p]] = [b[p], b[c]];
+    if (Math.abs(A[c][c]) < 1e-12) continue;
+    for (let r = c + 1; r < n; r++) {
+      const f = A[r][c] / A[c][c];
+      for (let k = c; k < n; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  const w = new Float64Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = b[i];
+    for (let j = i + 1; j < n; j++) s -= A[i][j] * w[j];
+    w[i] = Math.abs(A[i][i]) < 1e-12 ? 0 : s / A[i][i];
+  }
+  return w;
+}
+
+const dotv = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
+
+function buildModel(points) {
+  // Standardise the iris signal. Without this the quadratic terms (x² ~ 0.0001) are a thousand
+  // times smaller than the linear ones, the normal equations are garbage, and the solver answers
+  // with the enormous weights that started this whole mess.
+  const xs = points.map((p) => p.ix), ys = points.map((p) => p.iy);
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const sd = (a, m) => Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length) || 1e-4;
+  const mx = mean(xs), my = mean(ys);
+  const sx = sd(xs, mx), sy = sd(ys, my);
+  const feat = (ix, iy) => poly((ix - mx) / sx, (iy - my) / sy);
+
+  const fit = (idx, lambda) => {
+    const X = idx.map((i) => feat(points[i].ix, points[i].iy));
+    return {
+      wx: ridgeSolve(X, idx.map((i) => points[i].x), lambda),
+      wy: ridgeSolve(X, idx.map((i) => points[i].y), lambda),
+    };
+  };
+
+  const all = points.map((_, i) => i);
+
+  // LEAVE-ONE-OUT: the only honest error. Fit on the rest, predict the one held out. Also picks
+  // the ridge strength — too little and it overfits nine noisy points; too much and it flattens
+  // into a blob in the middle of the screen.
+  let best = { lambda: 0.1, err: Infinity };
+  for (const lambda of [0.01, 0.03, 0.1, 0.3, 1, 3, 10]) {
+    let err = 0;
+    for (let k = 0; k < points.length; k++) {
+      const m = fit(all.filter((i) => i !== k), lambda);
+      const f = feat(points[k].ix, points[k].iy);
+      err += Math.hypot(dotv(m.wx, f) - points[k].x, dotv(m.wy, f) - points[k].y);
+    }
+    err /= points.length;
+    if (err < best.err) best = { lambda, err };
+  }
+
+  const m = fit(all, best.lambda);
 
   return {
-    dim,
-    predict(v) {
-      const q = z(v);
-      let wsum = 0, sx = 0, sy = 0;
-      for (const c of centroids) {
-        let d2 = 0;
-        for (let i = 0; i < dim; i++) d2 += (q[i] - c.z[i]) ** 2;
-        // Sharp enough to pick a corner, soft enough to slide smoothly between neighbours.
-        const w = 1 / (d2 * d2 + 0.02);
-        wsum += w; sx += w * c.x; sy += w * c.y;
-      }
-      return [sx / wsum, sy / wsum];   // ALWAYS a blend of calibrated points. Bounded, always.
-    },
-    // How separated were the nine calibration points in feature space? If the eye barely moved
-    // between them, no algorithm on earth can tell them apart, and he deserves to be told.
-    spread() {
-      let min = Infinity;
-      for (let i = 0; i < centroids.length; i++) {
-        for (let j = i + 1; j < centroids.length; j++) {
-          let d2 = 0;
-          for (let k = 0; k < dim; k++) d2 += (centroids[i].z[k] - centroids[j].z[k]) ** 2;
-          min = Math.min(min, Math.sqrt(d2));
-        }
-      }
-      return min;
+    looErrorPx: Math.round(best.err),
+    lambda: best.lambda,
+    weightMax: Math.round(Math.max(...m.wx.map(Math.abs), ...m.wy.map(Math.abs))),
+    predict(ix, iy) {
+      const f = feat(ix, iy);
+      // Clamp: a quadratic surface can still shoot off past the calibrated range.
+      return [
+        Math.max(0, Math.min(window.innerWidth, dotv(m.wx, f))),
+        Math.max(0, Math.min(window.innerHeight, dotv(m.wy, f))),
+      ];
     },
   };
 }
@@ -352,7 +399,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    const [rx, ry] = model.predict(f.v);   // bounded by construction — always inside the fit
+    const [rx, ry] = model.predict(f.v[0], f.v[1]);   // iris only — a shrug must not hijack it
 
     const now = performance.now();
     const [mx, my] = median(rx, ry);
@@ -444,35 +491,34 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         // The MEDIAN of each feature, not the mean: one blink during this dot must not drag the
         // whole point sideways.
         const dim = keep[0].length;
-        const mean = [];
+        const med = [];
         for (let k = 0; k < dim; k++) {
           const col = keep.map((v) => v[k]).sort((a, b) => a - b);
-          mean.push(col[Math.floor(col.length / 2)]);
+          med.push(col[Math.floor(col.length / 2)]);
         }
-        points.push({ mean, x: px * window.innerWidth, y: py * window.innerHeight, n: keep.length });
+        points.push({
+          ix: med[0], iy: med[1],
+          x: px * window.innerWidth, y: py * window.innerHeight,
+          n: keep.length,
+        });
       }
 
       model = buildModel(points);
       median = makeMedian();
       fixate = makeFixation();
 
-      // How far apart were the nine points in feature space? If his eyes barely moved between
-      // the corners of the screen — sitting too far back, or a camera that cannot resolve the
-      // iris — then nothing downstream can separate them, and he needs to know THAT, not be
-      // handed a cursor that lies.
-      const spread = model.spread();
+      // The LEAVE-ONE-OUT error: fit on eight dots, predict the ninth, measure THAT. The old
+      // number (5px) was the model grading itself on data it had memorised. This one cannot lie.
+      const errorPx = model.looErrorPx;
 
-      // Honest residual: re-predict each calibration point from its own features.
-      let err = 0;
-      for (const pt of points) {
-        const [x, y] = model.predict(pt.mean);
-        err += Math.hypot(x - pt.x, y - pt.y);
-      }
-      const errorPx = Math.round(err / points.length);
+      // Half a tile is the bar. Wider than that and the wrong word gets spoken in his voice.
+      const tileW = window.innerWidth / 4, tileH = window.innerHeight / 2;
+      const usable = errorPx < Math.min(tileW, tileH) * 0.5;
 
       onCalibrationProgress({
-        state: 'done', errorPx, spread: +spread.toFixed(2), backend,
-        weak: spread < 0.8,
+        state: 'done', errorPx, usable, backend,
+        lambda: model.lambda, weightMax: model.weightMax,
+        tile: { w: Math.round(tileW), h: Math.round(tileH) },
         samples: points.reduce((a, p) => a + p.n, 0),
       });
       return true;
@@ -485,10 +531,11 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
 
     /** The raw signal, for diagnosis. If gaze is wrong, the answer is in here. */
     probe() {
-      return { backend, calibrated: !!model, running, features: 'iris+head',
-        method: 'inverse-distance interpolation (bounded)',
+      return { backend, calibrated: !!model, running, features: 'iris (quadratic ridge)',
         camera, irisPx,
-        spread: model ? +model.spread().toFixed(2) : null,
+        looErrorPx: model?.looErrorPx ?? null,
+        lambda: model?.lambda ?? null,
+        weightMax: model?.weightMax ?? null,
         noise: featureNoise() };
     },
 
