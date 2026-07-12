@@ -60,6 +60,7 @@ const flatten = (chunks) => {
 export function createMic({ onInterim, onFinal, onError, onLevel }) {
   let ctx, stream, node, source;
   let chunks = [];          // the current sentence
+  let pre = [];             // the last few frames before speech — or we clip his first word
   let recording = false;
   let speaking = false;
   let quietAt = 0, lastInterim = 0, startedAt = 0;
@@ -70,9 +71,14 @@ export function createMic({ onInterim, onFinal, onError, onLevel }) {
   // was ever captured. Learn the room instead of guessing at it.
   let floor = 0.004, calibrating = true, calSamples = [], calUntil = 0;
 
+  let gen = 0;              // every send is stamped; anything older than the newest final dies
+  let lastFinalGen = -1;
+
   async function send(audio, final) {
     if (inFlight && !final) return;              // don't stack interim requests
     if ((audio.length / TARGET_HZ) * 1000 < MIN_MS) return;
+    const myGen = ++gen;
+    if (final) lastFinalGen = myGen;
     inFlight = true;
     try {
       const res = await fetch('/api/listen', {
@@ -80,6 +86,9 @@ export function createMic({ onInterim, onFinal, onError, onLevel }) {
       });
       const { text, error } = await res.json();
       if (error) throw new Error(error);
+      // An interim launched before the final can resolve AFTER it, overwriting a complete
+      // sentence with a truncated one — and leaving the "still speaking" style stuck on.
+      if (myGen < lastFinalGen) return;
       const clean = (text ?? '').replace(/\[.*?\]/g, '').trim();
       if (!clean || clean.length < 2 || /^\W+$/.test(clean)) return;
       (final ? onFinal : onInterim)(clean);
@@ -128,20 +137,40 @@ export function createMic({ onInterim, onFinal, onError, onLevel }) {
         onLevel?.(rms);   // so a human can SEE the mic is alive
 
         // First 500ms: listen to the room, don't judge it.
+        //
+        // But people TAP AND TALK. If they start mid-calibration, the "room noise" we measure
+        // IS their voice, the floor lands above speech, and listening is silently dead for the
+        // rest of the session — while the level meter keeps bouncing, so it looks like the app
+        // heard everything and ignored it.
+        //
+        // Two defences: take the 20th percentile (a quiet frame, not the median of a sentence),
+        // and CLAMP — no amount of shouting can push the floor above a level real speech clears.
         if (calibrating) {
           calSamples.push(rms);
+          pre.push(downsample(new Float32Array(raw), ctx.sampleRate));  // keep it: pre-roll
+          if (pre.length > 16) pre.shift();
           if (now < calUntil) return;
-          const med = calSamples.sort((a, b) => a - b)[Math.floor(calSamples.length / 2)] || 0.002;
-          floor = Math.max(med * 3, 0.006);   // speech sits well above the room's own hum
+
+          const sorted = [...calSamples].sort((a, b) => a - b);
+          const q20 = sorted[Math.floor(sorted.length * 0.2)] || 0.002;
+          floor = Math.min(Math.max(q20 * 3, 0.006), 0.02);
           calibrating = false;
           return;
         }
 
+        // Keep learning the room from genuinely quiet frames, so a fan switching on doesn't
+        // deafen it for good.
+        if (!speaking && rms < floor) floor = Math.min(0.02, floor * 0.995 + rms * 3 * 0.005);
+
         if (rms > floor) {
+          if (!speaking) { chunks.push(...pre); pre = []; }   // recover the word's first syllable
           speaking = true;
           quietAt = 0;
           chunks.push(downsample(new Float32Array(raw), ctx.sampleRate));
-        } else if (speaking) {
+        } else if (!speaking) {
+          pre.push(downsample(new Float32Array(raw), ctx.sampleRate));
+          if (pre.length > 8) pre.shift();
+        } else {
           chunks.push(downsample(new Float32Array(raw), ctx.sampleRate)); // keep the tail
           if (!quietAt) quietAt = now;
           if (now - quietAt > HANG_MS) {

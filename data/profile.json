@@ -1,7 +1,12 @@
 {
   "name": "Ray",
   "about": "a 68-year-old grandfather with ALS. He can no longer speak. He is fully alert, funny, and impatient with fuss. He was a carpenter for forty years.",
-  "people": ["Emma (granddaughter)", "Susan (wife)", "Michael (son)", "Dr. Reyes"],
+  "people": [
+    "Emma (granddaughter)",
+    "Susan (wife)",
+    "Michael (son)",
+    "Dr. Reyes"
+  ],
   "voice": "plain, warm, dry humor, short sentences. He never uses two words where one will do.",
   "voiceModel": null,
   "openers": [
@@ -14,7 +19,6 @@
     "Emma",
     "I love you"
   ],
-
   "life": {
     "_why": "He cannot ask about a life he cannot mention. Without this, INITIATE mode can only ever offer him needs -- water, pain, help -- and he stays a man who wants things instead of a man who wonders about people. THIS is what lets him be curious.",
     "threads": [
@@ -26,14 +30,49 @@
       "Dr. Reyes wants to start a new medication he does not want",
       "his brother Frank has not visited since the diagnosis"
     ],
-    "cares_about": ["Emma", "Susan", "Michael", "baseball", "woodworking", "being outside", "not being a burden"]
+    "cares_about": [
+      "Emma",
+      "Susan",
+      "Michael",
+      "baseball",
+      "woodworking",
+      "being outside",
+      "not being a burden"
+    ]
   },
-
-  "core": ["yes", "no"],
+  "core": [
+    "yes",
+    "no"
+  ],
   "_core": "Pinned to the same two positions in EVERY grid, forever. AAC systems (LAMP, Words for Life) are built on motor learning: a tile that never moves gets memorized, and the user gets faster for years. A fully-reshuffling grid destroys that -- every pick becomes a fresh visual search. coreSlots is a measurable knob: raise it for stability, lower it for prediction. The eval measures the tradeoff instead of guessing it.",
-
-  "urgent": ["PAIN", "can't breathe", "help", "nurse", "bathroom", "too hot", "too cold", "suction"],
+  "urgent": [
+    "PAIN",
+    "can't breathe",
+    "help",
+    "nurse",
+    "bathroom",
+    "too hot",
+    "too cold",
+    "suction"
+  ],
   "_urgent": "Always one selection away, from any screen. If the grid is about Emma's graduation and he suddenly cannot breathe, a predicted grid TRAPS him. No amount of tile quality fixes that. This is a safety requirement, not a feature.",
-
-  "_note": "voiceModel: set to voices/ray.onnx once the clone is trained. Until then the app speaks in a stranger's voice and says so."
+  "_note": "voiceModel: set to voices/ray.onnx once the clone is trained. Until then the app speaks in a stranger's voice and says so.",
+  "instant": {
+    "yes": "Yes.",
+    "no": "No.",
+    "thank you": "Thank you.",
+    "i love you": "I love you.",
+    "help me": "Help me.",
+    "stop": "Stop.",
+    "wait": "Wait — I'm saying something.",
+    "pain": "I'm in pain.",
+    "can't breathe": "I can't breathe.",
+    "help": "Help me.",
+    "nurse": "Get the nurse.",
+    "bathroom": "I need the bathroom.",
+    "too hot": "I'm too hot.",
+    "too cold": "I'm too cold.",
+    "suction": "I need suction."
+  },
+  "_instant": "Spoken the INSTANT he picks them — no compose, no confirm. Every URGENT tile must be here: a man tapping 'suction' cannot wait for a language model."
 }

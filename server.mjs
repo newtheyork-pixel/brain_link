@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { readFile, appendFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { predictTiles, composeSentence, health } from './lib/llm.mjs';
-import { buildGrid } from './lib/tiles.mjs';
+import { buildGrid, clusterOf, dedupe } from './lib/tiles.mjs';
 import { speak } from './lib/voice.mjs';
 import { transcribe, available as asrReady } from './lib/listen.mjs';
 
@@ -47,8 +47,20 @@ async function logEvent(ev) {
 
 const routes = {
   'GET /api/health': async (req, res) => {
-    try { json(res, 200, { ok: true, llm: await health(), profile: profile.name }); }
-    catch (e) { json(res, 503, { ok: false, error: String(e.message) }); }
+    try {
+      json(res, 200, {
+        ok: true,
+        llm: await health(),
+        profile: profile.name,
+        // The client used to hardcode voice:'placeholder' — so even with a trained clone
+        // loaded, every utterance came out in a stranger's voice, forever.
+        voice: profile.voiceModel ? 'cloned' : 'placeholder',
+        // ONE instant map. The client kept a hand-copied duplicate behind a "kept in sync"
+        // comment, and it wasn't: six of the eight URGENT tiles had no entry, so tapping
+        // "nurse" or "suction" produced silence.
+        instant: profile.instant ?? {},
+      });
+    } catch (e) { json(res, 503, { ok: false, error: String(e.message) }); }
   },
 
   // Where is the model actually running? Answers the question a judge WILL ask on camera,
@@ -73,7 +85,10 @@ const routes = {
     // yes/no are ANSWERS, not continuations — and they are certainly not questions.
     // Pin them only while he is replying to someone. The eval caught the first half of
     // this: after he picked "tired", the judge marked the pinned yes/no as dead tiles.
-    const replying = selected.length === 0 && !!partner;
+    // Pin yes/no ONLY when he is answering someone. It used to ignore mode, so an ASK grid
+    // got "yes"/"no" pinned onto it — answers, to a question he is the one asking — and they
+    // bypassed the very filter meant to remove them.
+    const replying = mode === 'answer' && selected.length === 0 && !!partner;
     const slots = replying ? coreSlots : 0;
     const core = replying ? (profile.core ?? []) : [];
 
@@ -87,17 +102,21 @@ const routes = {
       // Ask for more than we need. Echo-stripping and synonym-dedupe both remove tiles,
       // and a half-empty grid is a worse failure than a slightly weaker 8th tile —
       // he only gets 8 chances to say anything at all.
-      let predicted = await predictTiles({ selected, partner, profile, mode, n: 12 });
+      const predicted = await predictTiles({ selected, partner, profile, mode, n: 14 });
+      let tiles = buildGrid({ core, predicted, selected, coreSlots: slots });
 
-      // He is the one asking. He cannot answer his own question — and every "yes" tile on
-      // an ASK grid is one of his eight slots spent on a word he can never use.
-      // Enforced here, not just in the prompt: a rule that matters shouldn't depend on a
-      // model choosing to follow it.
-      if (mode !== 'answer') {
-        predicted = predicted.filter((t) => !/^(yes|no|yeah|nope|maybe|okay)$/i.test(String(t).trim()));
+      // He is the one asking. He cannot answer his own question, and every "yes" tile on an
+      // ASK grid is one of his eight slots spent on a word he can never use.
+      // AFTER buildGrid, because echo-stripping can mint "okay" out of a longer tile — and via
+      // the synonym clusters, not a hand-rolled regex that had already drifted from them.
+      const YESNO = [clusterOf('yes'), clusterOf('no')];
+      if (mode !== 'answer') tiles = tiles.filter((t) => !YESNO.includes(clusterOf(t)));
+
+      // Never hand him an empty board. Echo-strip + dedupe can eat a whole grid, and a missing
+      // tile is a thing he cannot say.
+      if (tiles.length < 5) {
+        tiles = [...tiles, ...dedupe(OPENERS, [...tiles, ...selected])].slice(0, 8);
       }
-
-      const tiles = buildGrid({ core, predicted, selected, coreSlots: slots });
       json(res, 200, { tiles, source: mode === 'answer' ? 'predicted' : mode, ms: Date.now() - t0, coreSlots: slots });
     } catch (e) {
       // Never leave him staring at an empty grid because a model timed out.
