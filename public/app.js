@@ -23,6 +23,7 @@ const state = {
   predictive: true,
   urgent: false,
   listening: false,
+  mode: 'answer',   // answer | ask | tell — the only way he gets to start a conversation
   coreSlots: 2,   // how many tiles never move. Motor learning vs prediction — a measured knob.
   startedAt: null,
   selections: 0,
@@ -101,13 +102,18 @@ function undo() {
 async function loadTiles() {
   if (state.urgent) return; // he is in the emergency grid; do not yank it away
 
+  // When he is initiating, there IS no partner utterance — the whole point is that nobody
+  // spoke to him. Never let a stale sentence in the box turn his question back into a reply.
+  const partner = state.mode === 'answer' ? $('#partner-said').value.trim() : '';
+
   const res = await fetch('/api/tiles', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       selected: state.selected,
-      partner: $('#partner-said').value.trim(),
+      partner,
       predictive: state.predictive,
       coreSlots: state.coreSlots,
+      mode: state.mode,
     }),
   });
   const { tiles, source, ms } = await res.json();
@@ -139,12 +145,34 @@ async function compose() {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       selected: state.selected,
-      partner: $('#partner-said').value.trim(),
+      partner: state.mode === 'answer' ? $('#partner-said').value.trim() : '',
       literal: state.literal,
+      mode: state.mode,
     }),
   });
   const { candidates } = await res.json();
   showConfirm(candidates);
+}
+
+/** answer = reply to them. ask = put a question to them. tell = say something unprompted. */
+function setMode(mode) {
+  state.mode = mode;
+  state.selected = [];
+  state.selections = 0;
+  state.startedAt = null;
+  for (const m of ['answer', 'ask', 'tell']) {
+    const b = $(`#m-${m}`);
+    b.classList.toggle('on', m === mode);
+    b.setAttribute('aria-selected', String(m === mode));
+  }
+  // Hide the "they said to you" box when he is the one starting — it isn't his turn to
+  // react, and leaving it there quietly reframes his question as an answer.
+  $('#partner-block').hidden = mode !== 'answer';
+  $('#compose').textContent = mode === 'ask' ? 'Ask it' : 'Build sentence';
+  renderSelected();
+  renderComposing();
+  renderHUD();
+  loadTiles();
 }
 
 // He always chooses. The model proposes; it never speaks for him.
@@ -321,6 +349,9 @@ $('#undo').onclick = undo;
 $('#urgent').onclick = toggleUrgent;
 $('#cancel').onclick = closeConfirm;
 $('#listen').onclick = () => (state.listening ? stopListening() : startListening());
+$('#m-answer').onclick = () => setMode('answer');
+$('#m-ask').onclick = () => setMode('ask');
+$('#m-tell').onclick = () => setMode('tell');
 // He cannot raise a hand or clear his throat. Without this he can never ENTER a
 // conversation — only ever answer one someone else started.
 $('#hold').onclick = () => {

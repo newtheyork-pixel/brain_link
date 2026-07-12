@@ -126,3 +126,12 @@ footer b { color: var(--ink); font-variant-numeric: tabular-nums; font-size: 15p
 .scan-help em { color: var(--gold); font-style: normal; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* He can only ever REACT unless he can choose to start. These are that choice. */
+.modes { display: flex; gap: 8px; }
+button.mode { flex: 1; background: var(--surface); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px;
+  font-size: 15px; font-weight: 650; cursor: pointer; }
+button.mode:hover { color: var(--ink); }
+button.mode.on { background: rgba(91,141,239,.12); border-color: var(--accent);
+  color: var(--accent); }

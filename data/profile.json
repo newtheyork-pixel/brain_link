@@ -15,6 +15,20 @@
     "I love you"
   ],
 
+  "life": {
+    "_why": "He cannot ask about a life he cannot mention. Without this, INITIATE mode can only ever offer him needs -- water, pain, help -- and he stays a man who wants things instead of a man who wonders about people. THIS is what lets him be curious.",
+    "threads": [
+      "Emma graduated last month and is deciding between two job offers",
+      "Michael interviewed for a job in Denver and has not heard back",
+      "Susan has not been sleeping; she stays up in the chair next to him",
+      "the Red Sox are in a September collapse again",
+      "his old workshop is still full of tools nobody has touched",
+      "Dr. Reyes wants to start a new medication he does not want",
+      "his brother Frank has not visited since the diagnosis"
+    ],
+    "cares_about": ["Emma", "Susan", "Michael", "baseball", "woodworking", "being outside", "not being a burden"]
+  },
+
   "core": ["yes", "no"],
   "_core": "Pinned to the same two positions in EVERY grid, forever. AAC systems (LAMP, Words for Life) are built on motor learning: a tile that never moves gets memorized, and the user gets faster for years. A fully-reshuffling grid destroys that -- every pick becomes a fresh visual search. coreSlots is a measurable knob: raise it for stability, lower it for prediction. The eval measures the tradeoff instead of guessing it.",
 

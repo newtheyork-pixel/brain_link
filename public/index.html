@@ -29,7 +29,15 @@
   </div>
 </header>
 
-<section class="partner">
+<!-- Everything else in this app generates tiles from what SOMEONE ELSE said, which can only
+     ever make him a responder. These two buttons are the only way he gets to start. -->
+<section class="modes" role="tablist" aria-label="What do you want to do">
+  <button id="m-answer" class="mode on" role="tab" aria-selected="true">Answer them</button>
+  <button id="m-ask"    class="mode"    role="tab" aria-selected="false">Ask something</button>
+  <button id="m-tell"   class="mode"    role="tab" aria-selected="false">Say something</button>
+</section>
+
+<section class="partner" id="partner-block">
   <label for="partner-said">They said to you</label>
   <div class="hear-row">
     <input id="partner-said" type="text" placeholder="Tap Listen — or type it" autocomplete="off">

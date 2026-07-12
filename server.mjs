@@ -58,23 +58,25 @@ const routes = {
 
   // The grid he sees. core (pinned, never moves) + predicted (the contribution).
   'POST /api/tiles': async (req, res) => {
-    const { selected = [], partner = '', predictive = true, coreSlots = 2 } = await body(req);
+    const { selected = [], partner = '', predictive = true, coreSlots = 2, mode = 'answer' } = await body(req);
 
-    // yes/no are ANSWERS, not continuations. Pin them while he is replying to a question;
-    // free the slots once he is mid-phrase. The eval caught this: after he picked "tired",
-    // the judge marked the pinned yes/no as dead tiles — two of his eight slots, wasted.
-    const answering = selected.length === 0;
-    const slots = answering ? coreSlots : 0;
-    const core = answering ? (profile.core ?? []) : [];
+    // yes/no are ANSWERS, not continuations — and they are certainly not questions.
+    // Pin them only while he is replying to someone. The eval caught the first half of
+    // this: after he picked "tired", the judge marked the pinned yes/no as dead tiles.
+    const replying = selected.length === 0 && !!partner;
+    const slots = replying ? coreSlots : 0;
+    const core = replying ? (profile.core ?? []) : [];
 
-    if (!selected.length && !partner) return json(res, 200, { tiles: OPENERS, source: 'openers' });
-    if (!predictive) return json(res, 200, { tiles: OPENERS, source: 'static' });
+    if (!predictive && !partner) return json(res, 200, { tiles: OPENERS, source: 'static' });
+    if (!selected.length && !partner && mode === 'answer') {
+      return json(res, 200, { tiles: OPENERS, source: 'openers' });
+    }
 
     try {
       const t0 = Date.now();
-      const predicted = await predictTiles({ selected, partner, profile });
+      const predicted = await predictTiles({ selected, partner, profile, mode });
       const tiles = buildGrid({ core, predicted, coreSlots: slots });
-      json(res, 200, { tiles, source: 'predicted', ms: Date.now() - t0, coreSlots: slots });
+      json(res, 200, { tiles, source: mode === 'answer' ? 'predicted' : mode, ms: Date.now() - t0 });
     } catch (e) {
       // Never leave him staring at an empty grid because a model timed out.
       json(res, 200, { tiles: OPENERS, source: 'fallback', error: String(e.message) });
@@ -86,10 +88,10 @@ const routes = {
   'GET /api/urgent': async (req, res) => json(res, 200, { tiles: profile.urgent ?? [] }),
 
   'POST /api/compose': async (req, res) => {
-    const { selected = [], partner = '', literal = false } = await body(req);
+    const { selected = [], partner = '', literal = false, mode = 'answer' } = await body(req);
     try {
       const t0 = Date.now();
-      const candidates = await composeSentence({ selected, partner, profile, literal });
+      const candidates = await composeSentence({ selected, partner, profile, literal, mode });
       json(res, 200, { candidates, ms: Date.now() - t0, literal });
     } catch (e) {
       json(res, 200, { candidates: [selected.join(' ')], error: String(e.message), literal: true });
