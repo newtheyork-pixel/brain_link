@@ -74,5 +74,6 @@
     "too cold": "I'm too cold.",
     "suction": "I need suction."
   },
-  "_instant": "Spoken the INSTANT he picks them — no compose, no confirm. Every URGENT tile must be here: a man tapping 'suction' cannot wait for a language model."
+  "_instant": "Spoken the INSTANT he picks them — no compose, no confirm. Every URGENT tile must be here: a man tapping 'suction' cannot wait for a language model.",
+  "_README": "This is a TEMPLATE. Copy to data/profile.json (gitignored) and fill in the real user. Real profiles and session/gaze logs must NEVER be committed."
 }

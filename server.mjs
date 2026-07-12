@@ -14,7 +14,11 @@ const PORT = process.env.PORT ?? 8000;
 const ROOT = process.cwd();
 const SESSIONS = path.join(ROOT, 'data', 'sessions.jsonl');
 
-const profile = JSON.parse(await readFile(path.join(ROOT, 'data', 'profile.json'), 'utf8'));
+// Load the real per-user profile if present (gitignored); fall back to the committed template.
+// A real family's profile must never be in the repo, so the app must run without it.
+let profile;
+try { profile = JSON.parse(await readFile(path.join(ROOT, 'data', 'profile.json'), 'utf8')); }
+catch { profile = JSON.parse(await readFile(path.join(ROOT, 'data', 'profile.example.json'), 'utf8')); }
 const OPENERS = profile.openers;
 
 // .mjs and .wasm matter: a module served as text/plain is REFUSED by the browser, and the whole
@@ -195,7 +199,10 @@ createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': MIME[path.extname(file)] ?? 'text/plain' });
     res.end(buf);
   } catch { res.writeHead(404); res.end('not found'); }
-}).listen(PORT, () => {
+// Bind loopback ONLY. Binding all interfaces exposed /api/speak and /api/listen to the whole LAN
+// — anyone on the network could make the device speak, or send it audio. "Nothing leaves the
+// device" has to be true at the socket, not just in the README.
+}).listen(PORT, '127.0.0.1', () => {
   console.log(`\n  StillMe → http://localhost:${PORT}`);
   console.log(`  user: ${profile.name}   voice: ${profile.voiceModel ? 'CLONED' : 'placeholder (not his voice yet)'}`);
   console.log(`  input: touch + scanning (arrow keys simulate EOG)`);

@@ -149,6 +149,48 @@ function features(lm, face, matrix) {
  */
 const N_RBF = 5;   // 5x5 = 25 Gaussian centres across the eye's range
 
+const dotv = (w, v) => { let s = 0; for (let i = 0; i < w.length; i++) s += w[i] * v[i]; return s; };
+
+/**
+ * Ridge regression by the normal equations: w = (XᵀX + λI)⁻¹ Xᵀt, with Gaussian elimination and
+ * partial pivoting. The intercept (column 0) is NOT penalised — shrinking it would bias every
+ * prediction toward the screen origin.
+ *
+ * These two functions (plus buildModel) were deleted in a refactor and their callers left behind,
+ * so calibrate() threw ReferenceError and gaze was dead at HEAD. A smoke test guards it now.
+ */
+function ridgeSolve(X, t, lambda) {
+  const n = X[0].length;
+  const A = Array.from({ length: n }, () => new Float64Array(n));
+  const b = new Float64Array(n);
+  for (let r = 0; r < X.length; r++) {
+    for (let i = 0; i < n; i++) {
+      b[i] += X[r][i] * t[r];
+      for (let j = 0; j < n; j++) A[i][j] += X[r][i] * X[r][j];
+    }
+  }
+  for (let i = 1; i < n; i++) A[i][i] += lambda;   // never penalise the intercept
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]];
+    [b[c], b[p]] = [b[p], b[c]];
+    if (Math.abs(A[c][c]) < 1e-12) continue;
+    for (let r = c + 1; r < n; r++) {
+      const f = A[r][c] / A[c][c];
+      for (let k = c; k < n; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  const w = new Float64Array(n);
+  for (let i = n - 1; i >= 0; i--) {
+    let s = b[i];
+    for (let j = i + 1; j < n; j++) s -= A[i][j] * w[j];
+    w[i] = Math.abs(A[i][i]) < 1e-12 ? 0 : s / A[i][i];
+  }
+  return w;
+}
+
 function makeBasis(samples, extract) {
   const raw = samples.map(extract);
   const dim = raw[0].length;
@@ -162,21 +204,32 @@ function makeBasis(samples, extract) {
   }
   const z = (v) => v.map((x, k) => (x - mu[k]) / sg[k]);
 
-  // Centres on a grid over the first two standardised dimensions — the ones that carry gaze.
+  // Centres over the ACTUAL standardised spread of the first two dims, clamped to a sane range.
+  // A fixed ±1.8 grid put every bump outside the data whenever an axis barely varied (e.g. the
+  // vertical channel, whose range is a third of the horizontal) — the smoke test caught it as
+  // wild extrapolation. Standardised data is ~[-2,2], so span the bumps across that.
+  const zr = samples.map((s) => z(extract(s)));
+  const q = (col, p) => { const a = zr.map((v) => v[col]).sort((x, y) => x - y); return a[Math.floor(p * (a.length - 1))]; };
+  const lo0 = q(0, 0.05), hi0 = q(0, 0.95), lo1 = q(1, 0.05), hi1 = q(1, 0.95);
+  const span0 = Math.max(0.5, hi0 - lo0), span1 = Math.max(0.5, hi1 - lo1);
+
   const centres = [];
-  const lo = -1.8, hi = 1.8, stepC = (hi - lo) / (N_RBF - 1);
   for (let i = 0; i < N_RBF; i++) {
-    for (let j = 0; j < N_RBF; j++) centres.push([lo + i * stepC, lo + j * stepC]);
+    for (let j = 0; j < N_RBF; j++) {
+      centres.push([lo0 + (span0 * i) / (N_RBF - 1), lo1 + (span1 * j) / (N_RBF - 1)]);
+    }
   }
-  const gamma = 1 / (2 * stepC * stepC);   // bumps overlap their neighbours; no bald patches
+  // One shared width scaled to the grid spacing, so bumps overlap regardless of how the data sits.
+  const stepC = Math.max(span0, span1) / (N_RBF - 1);
+  const gamma = 1 / (2 * stepC * stepC);
 
   return {
     dim,
     feat(v) {
-      const q = z(v);
-      const f = [1, ...q];                                  // linear trend (lid, head ride here)
+      const zz = z(v);
+      const f = [1, ...zz];                                 // linear trend (lid, head ride here)
       for (const c of centres) {
-        const d2 = (q[0] - c[0]) ** 2 + (q[1] - c[1]) ** 2;
+        const d2 = (zz[0] - c[0]) ** 2 + (zz[1] - c[1]) ** 2;
         f.push(Math.exp(-gamma * d2));
       }
       return f;

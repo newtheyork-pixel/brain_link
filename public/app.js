@@ -118,18 +118,21 @@ window.addEventListener('keydown', (e) => {
 /* ---------- the loop ---------- */
 
 async function pick(tile) {
-  if (!tile || state.speaking) return;
-  if (!state.startedAt) state.startedAt = performance.now();
+  if (!tile) return;
 
-  // URGENT ALWAYS SPEAKS, IMMEDIATELY, AND KEEPS HIS SENTENCE.
-  // This used to be gated on having nothing selected — so tapping "can't breathe" halfway
-  // through a sentence said NOTHING and quietly appended the words to the sentence instead.
-  // The one grid that exists so he is never trapped was itself a trap.
+  // URGENT JUMPS THE QUEUE. Checked BEFORE the speaking guard — the old order let a still-playing
+  // sentence block "can't breathe" entirely. It speaks immediately, interrupting whatever is
+  // playing, and keeps his in-progress sentence. The grid that exists so he is never trapped must
+  // never itself be blocked.
   if (state.urgent) {
+    if (!state.startedAt) state.startedAt = performance.now();
     state.selections++;
-    await say(state.instant[norm(tile)] ?? `${tile}.`, { instant: true, keep: true });
+    await say(state.instant[norm(tile)] ?? `${tile}.`, { instant: true, keep: true, interrupt: true });
     return;
   }
+
+  if (state.speaking) return;
+  if (!state.startedAt) state.startedAt = performance.now();
 
   // "yes" needs no sentence built around it.
   const now = state.instant[norm(tile)];
@@ -291,8 +294,13 @@ let player = null;
  * (b) wiped his sentence, so "try again" was impossible. It must not have been said, so it
  * must not be logged, and his words must survive.
  */
-async function say(text, { instant = false, keep = false } = {}) {
-  if (state.speaking) return;          // double-tap used to stack two voices over each other
+let speakWatchdog = null;
+
+async function say(text, { instant = false, keep = false, interrupt = false } = {}) {
+  // Urgent interrupts; everything else waits its turn. Without interrupt, a stuck utterance could
+  // block the emergency grid — with it, "can't breathe" always speaks.
+  if (state.speaking && !interrupt) return;
+  clearSpeaking();                     // kill any current audio and reset the flag first
   state.speaking = true;
   closeConfirm();
 
@@ -300,11 +308,14 @@ async function say(text, { instant = false, keep = false } = {}) {
   const wasListening = state.listening;
   if (wasListening) stopListening();   // or the mic hears his own voice and answers itself
 
-  // Kill any previous audio before making a new one, and never let its onended fire late and
-  // restart the mic in the middle of this utterance.
-  if (player) { player.onended = null; player.pause(); player = null; }
-
   let url = null;
+  const done = () => {
+    clearTimeout(speakWatchdog);
+    if (url) { URL.revokeObjectURL(url); url = null; }
+    state.speaking = false;
+    if (wasListening) startListening();
+  };
+
   try {
     const res = await fetch('/api/speak', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -314,29 +325,33 @@ async function say(text, { instant = false, keep = false } = {}) {
 
     url = URL.createObjectURL(await res.blob());
     player = new Audio(url);
-    await player.play();               // a rejected promise here is the browser blocking sound
-
-    const done = () => {
-      if (url) { URL.revokeObjectURL(url); url = null; }
-      state.speaking = false;
-      if (wasListening) startListening();
-    };
     player.onended = done;
     player.onerror = done;
+    // WATCHDOG: if neither onended nor onerror ever fires (a stalled element), state.speaking
+    // would stick true and silence ALL later speech, including Urgent. Force it clear after a
+    // generous ceiling.
+    clearTimeout(speakWatchdog);
+    speakWatchdog = setTimeout(done, Math.max(4000, text.length * 140));
 
+    await player.play();               // a rejected promise here is the browser blocking sound
     speaking(text);
     logUtterance(text, startedAt, instant);
     if (!keep) reset();
   } catch (e) {
-    if (url) URL.revokeObjectURL(url);
-    state.speaking = false;
-    if (wasListening) startListening();
+    done();
     toast(e.name === 'NotAllowedError'
       ? 'The browser blocked the sound. Tap anywhere on the page, then try again.'
       : `Could not speak: ${e.message}`);
     // NOT logged, NOT reset. His words stay on screen so he can try again without rebuilding.
     if (!instant && state.selected.length) $('#confirm').hidden = false;
   }
+}
+
+/** Stop any current audio and clear the speaking flag — the single place that owns that state. */
+function clearSpeaking() {
+  clearTimeout(speakWatchdog);
+  if (player) { player.onended = null; player.onerror = null; try { player.pause(); } catch {} player = null; }
+  state.speaking = false;
 }
 
 /** selections_per_sentence and seconds_to_sentence are the numbers the research is about. */
@@ -481,7 +496,9 @@ function onGazePoint(x, y, locked) {
   dot.style.transform = `translate(${x}px, ${y}px)`;
   dot.classList.toggle('locked', !!locked);   // he can see when the eye has actually landed
 
-  if (!$('#confirm').hidden || !$('#calib').hidden || state.speaking) return resetDwell();
+  // Dwell pauses while a sheet/overlay is up, or while speaking — EXCEPT in the urgent grid,
+  // which he must be able to dwell-select even mid-utterance (it interrupts).
+  if (!$('#confirm').hidden || !$('#calib').hidden || (state.speaking && !state.urgent)) return resetDwell();
 
   const i = tileUnder(x, y);
 

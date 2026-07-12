@@ -12,3 +12,8 @@ asr/*.bin
 .env
 public/vendor/*.wasm
 public/vendor/*.task
+
+# Per-user data — a real family's profile, utterances, and gaze traces never touch git.
+data/profile.json
+data/*.jsonl
+!data/*.example.json
