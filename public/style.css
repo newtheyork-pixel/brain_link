@@ -247,3 +247,20 @@ body.gaze-mode .gear-float { display: flex; }
   width: 40px; height: 40px; align-items: center; justify-content: center;
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
   color: var(--muted); font-size: 17px; cursor: pointer; }
+
+/* Numbered sentence options — pickable by touch, by gaze dwell, or by blink. */
+.candidate { position: relative; display: flex; align-items: center; gap: 16px; overflow: hidden; }
+.candidate .num { flex: none; width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(91,141,239,.18); color: var(--accent); font-weight: 750; font-size: 20px; }
+.candidate .say { flex: 1; }
+/* the gaze dwell filling this option — same language as the tiles */
+.candidate::before { content: ""; position: absolute; inset: 0; border-radius: 14px;
+  background: rgba(91,141,239,.20);
+  transform: scaleX(var(--dwell, 0)); transform-origin: left; pointer-events: none;
+  transition: transform .05s linear; }
+.candidate.cursor { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(224,179,84,.28); }
+.candidate.cursor .num { background: rgba(224,179,84,.22); color: var(--gold); }
+/* a hint of how to drive it, shown only in gaze mode */
+.sheet-hint { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+.sheet-hint[hidden] { display: none; }

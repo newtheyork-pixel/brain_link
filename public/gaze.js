@@ -30,8 +30,13 @@ const DEFAULT_CAL = [
   [0.12, 0.82], [0.5, 0.84], [0.88, 0.82],
 ];
 const BLINK_ON = 0.55;             // blendshape value above which a lid counts as closed
-const BLINK_MIN_MS = 90;           // shorter than this is a twitch, not a blink
-const BLINK_MAX_MS = 700;          // longer than this is a rest, not a blink
+// Two deliberate-blink lengths, so blinks can both NAVIGATE and CONFIRM:
+//   short  (a quick, decided blink)  -> move to the next option
+//   long   (eyes held shut a beat)   -> say the highlighted option
+// Reflex blinks are ~100-150ms; we ignore anything below SHORT_MIN. Anything past LONG_MAX is a
+// rest, not a command.
+const BLINK_SHORT_MIN = 120, BLINK_SHORT_MAX = 450;
+const BLINK_LONG_MIN = 550, BLINK_LONG_MAX = 1600;
 
 // The iris landmarks. This model returns 478 points, and the last ten are the two irises —
 // the actual dark circles of his eyes, tracked directly.
@@ -475,13 +480,14 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     trackNoise(fRaw.v);
     const f = { ...fRaw, v: smoothFeatures(fRaw.v) };
 
-    // A deliberate blink is a SELECT. Reflex blinks are ~100-150ms and constant; we require the
-    // lids to stay shut a beat longer than that, but not so long it's just a rest.
+    // Classify the blink by how long the lids stayed shut: a quick blink is "next", a held blink
+    // is "say it". Reflex blinks (~100-150ms) fall below both windows and are ignored.
     if (f.bothShut && !lidWasShut) { lidWasShut = true; blinkStart = performance.now(); }
     else if (!f.bothShut && lidWasShut) {
       lidWasShut = false;
       const held = performance.now() - blinkStart;
-      if (held > BLINK_MIN_MS && held < BLINK_MAX_MS) onBlink(held);
+      if (held >= BLINK_SHORT_MIN && held <= BLINK_SHORT_MAX) onBlink('short', held);
+      else if (held >= BLINK_LONG_MIN && held <= BLINK_LONG_MAX) onBlink('long', held);
     }
 
     if (!model) return;

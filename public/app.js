@@ -94,8 +94,7 @@ function sheetEvent(event) {
   else if (event === 'RIGHT' || event === 'DOWN') sheetIdx = (sheetIdx + 1) % opts.length;
   else if (event === 'UNDO') return closeConfirm();
   else if (event === 'SELECT') return opts[sheetIdx].click();
-  opts.forEach((o, i) => o.classList.toggle('cursor', i === sheetIdx));
-  opts[sheetIdx].focus();
+  highlightSheet();
 }
 
 // Keyboard → the six events. Only while the scanning driver is on, and NEVER while the
@@ -259,20 +258,44 @@ function setMode(mode) {
 /* ---------- speaking ---------- */
 
 // He always chooses. The model proposes; it never speaks for him.
+//
+// Each option is NUMBERED, so he can pick it three ways, whichever his body allows today:
+//   - touch it,
+//   - look at it and hold his gaze (dwell),
+//   - or blink: a quick blink steps to the next option, a held blink says the highlighted one.
 function showConfirm(candidates) {
   const box = $('#candidates');
   box.innerHTML = '';
-  for (const c of candidates) {
+  candidates.forEach((c, i) => {
     const b = document.createElement('button');
     b.className = 'candidate';
-    b.textContent = c;
+    b.innerHTML = `<span class="num">${i + 1}</span><span class="say">${escapeHtml(c)}</span>`;
     b.onclick = () => say(c);
+    b.dataset.text = c;
     box.appendChild(b);
-  }
+  });
   sheetIdx = 0;
+  $('#sheet-hint').hidden = state.driver !== 'gaze';
   $('#confirm').hidden = false;
-  $$('.candidate')[0]?.classList.add('cursor');
+  highlightSheet();
   $$('.candidate')[0]?.focus();
+}
+
+const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/** Move the highlight across the numbered options + Back, and show which one is current. */
+function highlightSheet() {
+  const opts = [...$$('.candidate'), $('#cancel')];
+  opts.forEach((o, i) => o.classList.toggle('cursor', i === sheetIdx));
+  opts[sheetIdx]?.focus();
+}
+function sheetNext() {
+  const n = $$('.candidate').length + 1;   // +1 for Back
+  sheetIdx = (sheetIdx + 1) % n;
+  highlightSheet();
+}
+function sheetConfirm() {
+  [...$$('.candidate'), $('#cancel')][sheetIdx]?.click();
 }
 
 function closeConfirm() {
@@ -490,15 +513,51 @@ function resetDwell() {
   $$('.tile').forEach((t) => t.style.setProperty('--dwell', '0'));
 }
 
+// Gaze-dwell over the numbered sentence options. Bigger, forgiving targets — there are only a
+// few, stacked vertically, so vertical (the weak gaze axis) does the least work.
+let sheetDwellIdx = -1, sheetDwellStart = 0;
+function dwellOverSheet(x, y, locked) {
+  const opts = [...$$('.candidate'), $('#cancel')];
+  let hit = -1;
+  for (let i = 0; i < opts.length; i++) {
+    const r = opts[i].getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) { hit = i; break; }
+  }
+  if (hit < 0) { sheetDwellIdx = -1; opts.forEach((o) => o.style.setProperty('--dwell', '0')); return; }
+
+  if (hit !== sheetDwellIdx) {
+    opts.forEach((o) => o.style.setProperty('--dwell', '0'));
+    sheetDwellIdx = hit;
+    sheetDwellStart = performance.now();
+    sheetIdx = hit;
+    highlightSheet();
+    return;
+  }
+  if (!locked) { sheetDwellStart = performance.now(); return; }
+  const frac = Math.min(1, (performance.now() - sheetDwellStart) / state.dwellMs);
+  opts[hit].style.setProperty('--dwell', String(frac));
+  if (frac >= 1) {
+    sheetDwellIdx = -1;
+    opts.forEach((o) => o.style.setProperty('--dwell', '0'));
+    opts[hit].click();
+  }
+}
+
 function onGazePoint(x, y, locked) {
   const dot = $('#gaze-dot');
   dot.hidden = false;
   dot.style.transform = `translate(${x}px, ${y}px)`;
   dot.classList.toggle('locked', !!locked);   // he can see when the eye has actually landed
 
-  // Dwell pauses while a sheet/overlay is up, or while speaking — EXCEPT in the urgent grid,
-  // which he must be able to dwell-select even mid-utterance (it interrupts).
-  if (!$('#confirm').hidden || !$('#calib').hidden || (state.speaking && !state.urgent)) return resetDwell();
+  if (!$('#calib').hidden) return resetDwell();
+
+  // The sentence sheet is its own dwell surface: he can look at a numbered option and hold his
+  // gaze to say it, exactly as he selects a tile. (Blinks work here too — see onBlink.)
+  if (!$('#confirm').hidden) return dwellOverSheet(x, y, locked);
+
+  // On the grid, dwell pauses while speaking — EXCEPT in the urgent grid, which he must be able
+  // to dwell-select even mid-utterance (it interrupts).
+  if (state.speaking && !state.urgent) return resetDwell();
 
   const i = tileUnder(x, y);
 
@@ -548,8 +607,20 @@ async function startGaze() {
   if (gaze) return;
   const g = createGaze({
     onGaze: onGazePoint,
-    onBlink: () => {
-      if (dwellTile >= 0 && $('#confirm').hidden && $('#calib').hidden && !state.speaking) {
+    onBlink: (kind) => {
+      if (!$('#calib').hidden) return;                 // never during calibration
+
+      // In the sentence sheet, blinks are the whole interface for a blink-only user:
+      //   quick blink -> next numbered option, held blink -> say the highlighted one.
+      if (!$('#confirm').hidden) {
+        if (kind === 'short') sheetNext();
+        else if (kind === 'long') sheetConfirm();
+        return;
+      }
+      // On the tile grid, a blink is a SECOND way to confirm what he is already dwelling on —
+      // never a first (a webcam can't tell a deliberate blink from a reflex, and a reflex must
+      // never fire a word). A held blink confirms; a quick one is ignored here.
+      if (kind === 'long' && dwellTile >= 0 && !state.speaking) {
         resetDwell();
         bus.emit('SELECT');
       }
