@@ -192,3 +192,9 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
 @media (prefers-reduced-motion: reduce) {
   .calib-dot, .calib-dot.sampling, .gaze-dot { animation: none; transition: none; }
 }
+/* the tile the accuracy test is asking him to look at */
+.tile.target { border-color: var(--gold); background: rgba(224,179,84,.18);
+  box-shadow: 0 0 0 4px rgba(224,179,84,.3); }
+/* the eye has landed and is holding — the dwell is now counting */
+.gaze-dot.locked { background: rgba(224,179,84,.45); border-color: var(--gold);
+  width: 18px; height: 18px; margin: -9px 0 0 -9px; }

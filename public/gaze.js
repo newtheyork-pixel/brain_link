@@ -25,22 +25,45 @@ const BLINK_ON = 0.55;             // blendshape value above which a lid counts 
 const BLINK_MIN_MS = 90;           // shorter than this is a twitch, not a blink
 const BLINK_MAX_MS = 700;          // longer than this is a rest, not a blink
 
+// The iris landmarks. This model returns 478 points, and the last ten are the two irises —
+// the actual dark circles of his eyes, tracked directly.
+const IRIS_L = 468, IRIS_R = 473;
+// Eye corners and lids, to measure WHERE IN THE EYE the iris is sitting.
+const L_OUT = 33, L_IN = 133, L_TOP = 159, L_BOT = 145;
+const R_IN = 362, R_OUT = 263, R_TOP = 386, R_BOT = 374;
+
 /**
  * Where the eyes are pointing, plus where the head is pointing.
  *
- * People aim at things with BOTH. Using eye blendshapes alone drifts badly the moment someone
- * turns their head; using head pose alone can't tell a glance from a stare. Feeding both to the
- * calibration fit lets it work out the mix for this particular person, in this particular chair.
+ * THE FIX for "it just moves forever": I was reading the BLENDSHAPES (eyeLookIn/Out/Up/Down).
+ * Those exist to animate cartoon avatars. They are coarse, heavily smoothed, and quantised —
+ * fine for making a puppet glance sideways, hopeless for telling which of eight tiles a man is
+ * looking at. Feeding them into a linear fit produced a dot that wandered and never settled.
+ *
+ * The same model also gives the IRIS LANDMARKS. So measure the thing directly: where does the
+ * iris sit between the corners of the eye, and between the lids? That is a real, continuous,
+ * high-resolution gaze signal — and it is what actual eye trackers use.
+ *
+ * We keep the head pose too. People aim with the eyes AND the head; the calibration fit works
+ * out the mix for this person, in this chair.
  */
-function features(face, matrix) {
+function features(lm, face, matrix) {
   const b = {};
   for (const c of face) b[c.categoryName] = c.score;
 
-  // Anatomy: looking right ADDUCTS the left eye (in, toward the nose) and ABDUCTS the right eye.
-  const x = (b.eyeLookInLeft ?? 0) + (b.eyeLookOutRight ?? 0)
-          - (b.eyeLookOutLeft ?? 0) - (b.eyeLookInRight ?? 0);
-  const y = (b.eyeLookUpLeft ?? 0) + (b.eyeLookUpRight ?? 0)
-          - (b.eyeLookDownLeft ?? 0) - (b.eyeLookDownRight ?? 0);
+  // How far across the eye is the iris? 0 = against one corner, 1 = against the other.
+  // Divided by the eye's own width, so it survives him leaning toward or away from the camera.
+  const across = (iris, inner, outer) => {
+    const w = lm[outer].x - lm[inner].x;
+    return Math.abs(w) < 1e-6 ? 0.5 : (lm[iris].x - lm[inner].x) / w;
+  };
+  const between = (iris, top, bot) => {
+    const h = lm[bot].y - lm[top].y;
+    return Math.abs(h) < 1e-6 ? 0.5 : (lm[iris].y - lm[top].y) / h;
+  };
+
+  const ix = (across(IRIS_L, L_IN, L_OUT) + across(IRIS_R, R_IN, R_OUT)) / 2 - 0.5;
+  const iy = (between(IRIS_L, L_TOP, L_BOT) + between(IRIS_R, R_TOP, R_BOT)) / 2 - 0.5;
 
   // Head yaw/pitch out of the 4x4 rigid transform (column-major).
   let yaw = 0, pitch = 0;
@@ -53,7 +76,12 @@ function features(face, matrix) {
   const lid = Math.max(b.eyeBlinkLeft ?? 0, b.eyeBlinkRight ?? 0);
   const bothShut = (b.eyeBlinkLeft ?? 0) > BLINK_ON && (b.eyeBlinkRight ?? 0) > BLINK_ON;
 
-  return { v: [x, y, yaw, pitch, 1], lid, bothShut };
+  // Cross terms let the fit correct gaze for head turn — looking left with the head turned left
+  // is not the same eye position as looking left with the head straight.
+  return {
+    v: [ix, iy, yaw, pitch, ix * yaw, iy * pitch, 1],
+    lid, bothShut,
+  };
 }
 
 /**
@@ -62,7 +90,7 @@ function features(face, matrix) {
  * Ridge term keeps it from blowing up when someone barely moves their eyes during calibration.
  */
 function solve(X, t, ridge = 1e-4) {
-  const n = 5;
+  const n = X[0].length;
   const A = Array.from({ length: n }, () => new Float64Array(n));
   const b = new Float64Array(n);
   for (let r = 0; r < X.length; r++) {
@@ -98,19 +126,61 @@ function solve(X, t, ridge = 1e-4) {
 const dot = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
 
 /**
- * One-Euro-ish smoothing: heavy when the eye is resting (kills jitter, so the cursor doesn't
- * shiver off the tile he's trying to dwell on), light when it's moving (so it doesn't lag).
- * A fixed low-pass would force a choice between a shaky cursor and a sluggish one.
+ * THE OUTPUT STAGE. This is where "it just moves forever" was coming from.
+ *
+ * I was treating gaze like a mouse cursor: take the model's estimate every frame and glide the
+ * dot toward it. But an eye does not glide. It JUMPS and then HOLDS (saccade, then fixation).
+ * Chasing a per-frame estimate produces a dot that drifts forever and never settles on anything
+ * — which is exactly what it did.
+ *
+ * So: reject the outliers, detect when the eye has actually LANDED, and freeze while it holds.
  */
-function makeSmoother(minAlpha = 0.08, maxAlpha = 0.9, speedScale = 900) {
-  let px = null, py = null;
+
+/** Median of the last N — kills the single-frame spikes a mean would smear across the screen. */
+function makeMedian(n = 7) {
+  const bx = [], by = [];
+  const mid = (a) => [...a].sort((p, q) => p - q)[Math.floor(a.length / 2)];
   return (x, y) => {
-    if (px === null) { px = x; py = y; return [x, y]; }
-    const speed = Math.hypot(x - px, y - py);
-    const a = Math.min(maxAlpha, minAlpha + (speed / speedScale) * (maxAlpha - minAlpha));
-    px += a * (x - px);
-    py += a * (y - py);
-    return [px, py];
+    bx.push(x); by.push(y);
+    if (bx.length > n) { bx.shift(); by.shift(); }
+    return [mid(bx), mid(by)];
+  };
+}
+
+/**
+ * Fixation detector. While the eye is moving, follow it fast. The moment it settles, LOCK —
+ * and keep the dot dead still until it genuinely moves again.
+ *
+ * The lock is what makes the thing usable: a target that trembles under your gaze can never be
+ * dwelled on, because every tremor resets the dwell.
+ */
+function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {}) {
+  let px = null, py = null;        // reported position
+  let lx = 0, ly = 0;              // last raw
+  let stillSince = 0, locked = false;
+
+  return (x, y, now) => {
+    if (px === null) { px = x; py = y; lx = x; ly = y; stillSince = now; return [px, py, false]; }
+
+    const step = Math.hypot(x - lx, y - ly);
+    lx = x; ly = y;
+
+    if (locked) {
+      // Only break the lock on a real, sustained move — not on jitter.
+      if (Math.hypot(x - px, y - py) > moveThresh) { locked = false; stillSince = now; }
+      else return [px, py, true];
+    }
+
+    // Not locked: track, but heavily damped so it doesn't skate.
+    px += 0.35 * (x - px);
+    py += 0.35 * (y - py);
+
+    if (step < holdThresh) {
+      if (now - stillSince > settleMs) { locked = true; px = x; py = y; }
+    } else {
+      stillSince = now;
+    }
+    return [px, py, locked];
   };
 }
 
@@ -118,10 +188,12 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   let landmarker = null, video = null, stream = null, backend = '?';
   let running = false, calibrating = false;
   let model = null;                       // { wx, wy } once calibrated
-  let smooth = makeSmoother();
+  let median = makeMedian();
+  let fixate = makeFixation();
   let lastTs = -1;
 
   let blinkStart = 0, lidWasShut = false;
+  let lastSample = null;      // the latest gaze point + raw features, for the accuracy test
   let calBucket = [], calResolve = null;
 
   function teardown() {
@@ -171,10 +243,12 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     catch { return; }
 
     const face = out.faceBlendshapes?.[0]?.categories;
-    if (!face || !face.length) { onFace(false); return; }
+    const lm = out.faceLandmarks?.[0];
+    // 478 landmarks means the iris points are there. 468 means they are not, and gaze is dead.
+    if (!face?.length || !lm || lm.length < 478) { onFace(false); return; }
     onFace(true);
 
-    const f = features(face, out.facialTransformationMatrixes?.[0]);
+    const f = features(lm, face, out.facialTransformationMatrixes?.[0]);
 
     // A deliberate blink is a SELECT. Reflex blinks are ~100-150ms and constant; we require the
     // lids to stay shut a beat longer than that, but not so long it's just a rest.
@@ -191,8 +265,17 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    const [x, y] = smooth(dot(model.wx, f.v), dot(model.wy, f.v));
-    onGaze(x, y);
+    // A LINEAR fit extrapolates without limit: glance past the edge of the calibrated range and
+    // it happily reports a point three screens away, dragging the dot off into space. Clamp it.
+    const rx = Math.max(0, Math.min(window.innerWidth, dot(model.wx, f.v)));
+    const ry = Math.max(0, Math.min(window.innerHeight, dot(model.wy, f.v)));
+
+    const now = performance.now();
+    const [mx, my] = median(rx, ry);
+    const [x, y, locked] = fixate(mx, my, now);
+
+    lastSample = { x, y, locked, raw: f.v.map((n) => +n.toFixed(3)) };
+    onGaze(x, y, locked);
   }
 
   return {
@@ -269,21 +352,62 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
 
       if (X.length < 40) { onError('Calibration failed — your face was not visible enough.'); return false; }
 
-      model = { wx: solve(X, tx), wy: solve(X, ty) };
-      smooth = makeSmoother();
+      // FIT, THEN THROW AWAY THE WORST, THEN FIT AGAIN.
+      // Least squares has no defence against a bad sample: one frame where he blinked, or where
+      // the eye was still travelling to the dot, tilts the entire plane. Two refits, each
+      // dropping the worst 20% of residuals, and the fit stops being hostage to a few frames.
+      let wx = solve(X, tx), wy = solve(X, ty);
+      for (let pass = 0; pass < 2; pass++) {
+        const res = X.map((v, i) => Math.hypot(dot(wx, v) - tx[i], dot(wy, v) - ty[i]));
+        const cut = [...res].sort((a, b) => a - b)[Math.floor(res.length * 0.8)];
+        const kx = [], ktx = [], kty = [];
+        for (let i = 0; i < X.length; i++) {
+          if (res[i] <= cut) { kx.push(X[i]); ktx.push(tx[i]); kty.push(ty[i]); }
+        }
+        if (kx.length < 30) break;
+        wx = solve(kx, ktx); wy = solve(kx, kty);
+      }
+
+      model = { wx, wy };
+      median = makeMedian();
+      fixate = makeFixation();
 
       // Honest self-check: how far off is the fit on its own training points? If it can't even
       // reproduce those, the tracking will be useless and the user deserves to know now.
       let err = 0;
+      const worst = [];
       for (let i = 0; i < X.length; i++) {
-        err += Math.hypot(dot(model.wx, X[i]) - tx[i], dot(model.wy, X[i]) - ty[i]);
+        const e = Math.hypot(dot(model.wx, X[i]) - tx[i], dot(model.wy, X[i]) - ty[i]);
+        err += e;
+        worst.push(e);
       }
+      worst.sort((a, b) => a - b);
       const px = err / X.length;
-      onCalibrationProgress({ state: 'done', errorPx: Math.round(px) });
+      onCalibrationProgress({
+        state: 'done',
+        errorPx: Math.round(px),
+        p90Px: Math.round(worst[Math.floor(worst.length * 0.9)] ?? px),
+        samples: X.length,
+        backend,
+      });
       return true;
     },
 
     recalibrate() { model = null; },
+
+    /** The raw signal, for diagnosis. If gaze is wrong, the answer is in here. */
+    probe() {
+      return { backend, calibrated: !!model, running, features: 'iris+head',
+        model: model ? {
+          wx: [...model.wx].map((n) => +n.toFixed(1)),
+          wy: [...model.wy].map((n) => +n.toFixed(1)),
+        } : null };
+    },
+
+    /** Where the gaze lands right now, unsmoothed — used by the accuracy test. */
+    sample() {
+      return lastSample;
+    },
 
     stop() { teardown(); },
   };

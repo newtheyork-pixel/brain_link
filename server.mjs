@@ -163,6 +163,17 @@ const routes = {
     } catch (e) { json(res, 500, { error: String(e.message) }); }
   },
 
+  // Eye-tracking telemetry. The camera runs in HIS browser, not mine, so the app measures
+  // itself and writes the result here. Calibration residual, live feature ranges, and a real
+  // per-tile hit rate — a number, instead of "does the dot feel about right".
+  'POST /api/gazelog': async (req, res) => {
+    const ev = await body(req);
+    await mkdir(path.dirname(SESSIONS), { recursive: true });
+    await appendFile(path.join(ROOT, 'data', 'gaze.jsonl'),
+      JSON.stringify({ ...ev, at: new Date().toISOString() }) + '\n');
+    json(res, 200, { ok: true });
+  },
+
   // selections_per_sentence and seconds_to_sentence are the two numbers the paper is about.
   'POST /api/log': async (req, res) => {
     await logEvent(await body(req));

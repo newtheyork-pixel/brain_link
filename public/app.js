@@ -436,6 +436,27 @@ function stopListening() {
 let gaze = null;
 let dwellTile = -1, dwellStart = 0;
 
+// TILE HYSTERESIS.
+//
+// A gaze point sitting near a border flickers between two tiles, and every flicker RESETS the
+// dwell — so he stares at a word for ten seconds and it never picks. The cursor now stays where
+// it is until the gaze is convincingly inside a different tile, for several frames running.
+let candidateTile = -1, candidateFrames = 0;
+const SWITCH_FRAMES = 4;      // frames of agreement before the cursor moves
+const MARGIN = 0.72;          // must be this far inside the new tile, not just over the line
+
+function tileUnder(x, y) {
+  const tiles = $$('.tile');
+  for (let i = 0; i < tiles.length; i++) {
+    const r = tiles[i].getBoundingClientRect();
+    // Shrink the hit box: being barely over the edge is not the same as looking AT it.
+    const w = r.width * MARGIN / 2, h = r.height * MARGIN / 2;
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    if (Math.abs(x - cx) <= w && Math.abs(y - cy) <= h) return i;
+  }
+  return -1;
+}
+
 function tileAt(x, y) {
   const tiles = $$('.tile');
   for (let i = 0; i < tiles.length; i++) {
@@ -451,24 +472,39 @@ function resetDwell() {
   $$('.tile').forEach((t) => t.style.setProperty('--dwell', '0'));
 }
 
-function onGazePoint(x, y) {
+function onGazePoint(x, y, locked) {
   const dot = $('#gaze-dot');
   dot.hidden = false;
   dot.style.transform = `translate(${x}px, ${y}px)`;
+  dot.classList.toggle('locked', !!locked);   // he can see when the eye has actually landed
 
   if (!$('#confirm').hidden || !$('#calib').hidden || state.speaking) return resetDwell();
 
-  const i = tileAt(x, y);
-  if (i < 0) return resetDwell();
+  const i = tileUnder(x, y);
 
+  // Only accept a tile change once the gaze has agreed with itself for several frames. Without
+  // this the cursor flickers across a border and the dwell restarts forever — he stares at a
+  // word and it never picks.
   if (i !== dwellTile) {
+    if (i === candidateTile) candidateFrames++;
+    else { candidateTile = i; candidateFrames = 1; }
+    if (candidateFrames < SWITCH_FRAMES) return;
+
     resetDwell();
     dwellTile = i;
     dwellStart = performance.now();
-    state.cursor = i;
-    renderGrid();
+    if (i >= 0) { state.cursor = i; renderGrid(); }
     return;
   }
+  candidateTile = i;
+  candidateFrames = 0;
+  if (i < 0) return;
+
+  // The dwell only accumulates while the eye is HOLDING. If he is still moving, he has not
+  // chosen yet — and a dwell that fills while the eye is in flight is a misfire waiting to
+  // happen, which on this device means a word he did not mean, spoken aloud in his voice.
+  if (!locked) { dwellStart = performance.now(); return; }
+
   const frac = Math.min(1, (performance.now() - dwellStart) / state.dwellMs);
   $$('.tile')[i]?.style.setProperty('--dwell', String(frac));
   if (frac >= 1) {
@@ -496,8 +532,14 @@ async function startGaze() {
     onCalibrationProgress: (p) => {
       if (p.state === 'done') {
         $('#calib').hidden = true;
-        $('#gaze-state').textContent = `Calibrated (±${p.errorPx}px).`;
+        $('#gaze-state').textContent = `Calibrated (±${p.errorPx}px, p90 ${p.p90Px}px).`;
         if (p.errorPx > 180) toast('Calibration is rough — sit still, get more light, try again.');
+        else toast(`Calibrated (±${p.errorPx}px). Now run Test accuracy.`);
+        fetch('/api/gazelog', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'calibration', ...p,
+            screen: { w: window.innerWidth, h: window.innerHeight }, probe: gaze?.probe() }),
+        }).catch(() => {});
         return;
       }
       $('#calib').hidden = false;
@@ -517,6 +559,77 @@ async function startGaze() {
   $('#gaze-row').hidden = false;
   $('#gaze-state').textContent = `Camera on (${g.backend}) — not calibrated yet.`;
   toast('Camera on. Calibrate before selecting with your eyes.');
+}
+
+/**
+ * THE ACCURACY TEST.
+ *
+ * "Does the dot feel about right" is not a measurement. This lights each tile in turn, asks him
+ * to look at it, records where the gaze actually lands, and scores itself: how often does the
+ * gaze fall on the tile he was told to look at?
+ *
+ * That number decides whether the camera tier is real or a toy — and it is the number that goes
+ * in the writeup. It also tells us WHICH tiles fail: if the corners miss but the middle is fine,
+ * the fit needs more calibration spread, not a different algorithm.
+ */
+async function testGazeAccuracy() {
+  if (!gaze?.calibrated) return toast('Calibrate first.');
+
+  const tiles = $$('.tile');
+  const results = [];
+  $('#calib-msg').textContent = 'Look at the highlighted tile';
+  $('#calib').hidden = false;
+  $('#calib-dot').style.display = 'none';
+
+  for (let i = 0; i < tiles.length; i++) {
+    $('#calib').hidden = true;                       // let him actually see the grid
+    tiles.forEach((t, j) => t.classList.toggle('target', i === j));
+    $('#calib-count').textContent = `${i + 1} of ${tiles.length}`;
+    await new Promise((r) => setTimeout(r, 1300));   // settle
+
+    const pts = [];
+    for (let k = 0; k < 12; k++) {
+      const s = gaze.sample();
+      if (s) pts.push(s);
+      await new Promise((r) => setTimeout(r, 45));
+    }
+    if (!pts.length) { results.push({ tile: i, hit: false, reason: 'no face' }); continue; }
+
+    const mx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+    const my = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+    const r = tiles[i].getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+
+    results.push({
+      tile: i,
+      label: state.tiles[i],
+      hit: tileAt(mx, my) === i,
+      landedOn: tileAt(mx, my),
+      offsetPx: Math.round(Math.hypot(mx - cx, my - cy)),
+      raw: pts[pts.length - 1].raw,
+    });
+  }
+
+  tiles.forEach((t) => t.classList.remove('target'));
+  $('#calib').hidden = true;
+  $('#calib-dot').style.display = '';
+
+  const hits = results.filter((r) => r.hit).length;
+  const pct = Math.round((hits / results.length) * 100);
+  toast(`Eye tracking hit the right tile ${hits} of ${results.length} times (${pct}%).`);
+  $('#gaze-state').textContent = `Accuracy: ${hits}/${results.length} tiles (${pct}%).`;
+
+  // Send it to the server so it can actually be read, instead of living in a toast.
+  fetch('/api/gazelog', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      kind: 'accuracy',
+      hits, total: results.length, pct,
+      screen: { w: window.innerWidth, h: window.innerHeight },
+      probe: gaze.probe(),
+      results,
+    }),
+  }).catch(() => {});
 }
 
 function stopGaze() {
@@ -623,6 +736,7 @@ $('#driver').onchange = (e) => {
   renderGrid();
 };
 $('#calibrate').onclick = () => gaze?.calibrate();
+$('#test-gaze').onclick = testGazeAccuracy;
 $('#dwell').oninput = (e) => {
   state.dwellMs = +e.target.value;
   $('#dwell-label').textContent = `Hold a tile for ${(state.dwellMs / 1000).toFixed(1)}s to pick it.`;
