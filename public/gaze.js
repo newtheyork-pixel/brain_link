@@ -13,15 +13,21 @@
 
 import { FaceLandmarker, FilesetResolver } from '/vendor/vision_bundle.mjs';
 
-// Thirteen, not nine. Nine points to fit a nine-parameter surface is razor thin: one bad dot
-// tips the whole thing. The extras sit at the tile centres, where accuracy actually matters.
-const CAL_POINTS = [
-  [0.5, 0.5],                                    // centre first: that is the neutral pose
-  [0.06, 0.08], [0.5, 0.06], [0.94, 0.08],
-  [0.04, 0.5],                [0.96, 0.5],
-  [0.06, 0.92], [0.5, 0.94], [0.94, 0.92],
-  [0.25, 0.30], [0.75, 0.30],                    // where the top row of tiles actually is
-  [0.25, 0.72], [0.75, 0.72],                    // and the bottom row
+// CALIBRATE WHERE THE TILES ARE, not at the corners of the glass.
+//
+// I was calibrating at the extreme top and bottom edges of the screen. The two worst points in
+// the last run were both at the very bottom — because extreme downgaze is exactly where the upper
+// eyelid comes down over the iris and the signal falls apart. Those points were teaching the model
+// nonsense, and it then applied that nonsense everywhere.
+//
+// He never looks at the bottom edge of the glass. He looks at TILES. So calibrate there: the app
+// hands us the real tile centres, and we add a modest margin around them so the fit is
+// interpolating across his working area rather than extrapolating out of it.
+const DEFAULT_CAL = [
+  [0.5, 0.5],
+  [0.12, 0.18], [0.5, 0.16], [0.88, 0.18],
+  [0.10, 0.5],                [0.90, 0.5],
+  [0.12, 0.82], [0.5, 0.84], [0.88, 0.82],
 ];
 const SAMPLES_PER_POINT = 22;      // ~0.7s of frames
 const SETTLE_MS = 600;             // let the eye actually land before we believe it
@@ -92,6 +98,16 @@ function features(lm, face, matrix) {
   const ix = (L.x + R.x) / 2;
   const iy = (L.y + R.y) / 2;
 
+  // Lid opening, normalised by eye width. Looking DOWN closes the lid; looking UP opens it. It is
+  // one of the strongest vertical-gaze cues on a webcam — and without it the model cannot separate
+  // a downward eye from a drooping lid, which is exactly what wrecked the bottom of the screen.
+  const aperture = (top, bot, c1, c2) => {
+    const h = Math.hypot(lm[bot].x - lm[top].x, lm[bot].y - lm[top].y);
+    const w = Math.hypot(lm[c2].x - lm[c1].x, lm[c2].y - lm[c1].y) || 1e-6;
+    return h / w;
+  };
+  const ap = (aperture(L_TOP, L_BOT, L_OUT, L_IN) + aperture(R_TOP, R_BOT, R_IN, R_OUT)) / 2;
+
   // Head yaw/pitch out of the 4x4 rigid transform (column-major).
   let yaw = 0, pitch = 0;
   if (matrix) {
@@ -105,7 +121,7 @@ function features(lm, face, matrix) {
 
   // No cross-terms. They multiply two noisy numbers together and hand the result to a model that
   // has to tell an 8th of a screen apart. Iris and head pose, and nothing else.
-  return { v: [ix, iy, yaw, pitch], lid, bothShut };
+  return { v: [ix, iy, yaw, pitch, ap], lid, bothShut };
 }
 
 /**
@@ -181,27 +197,28 @@ const dotv = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
  * So fit BOTH candidates and let leave-one-out cross-validation pick the winner. The data decides
  * which features matter, not me. I have now guessed wrong three times; the guessing stops here.
  */
-const VARIANTS = {
-  // eye-in-head only
-  iris: (p) => [p.ix, p.iy],
-  // eye-in-head + head-in-world: the classic decomposition, and what a person actually does
-  'iris+head': (p) => [p.ix + 0.6 * p.yaw, p.iy + 0.6 * p.pitch, p.ix, p.iy],
-  // head only — the control. If THIS wins, he is aiming with his head and not his eyes at all.
-  head: (p) => [p.yaw, p.pitch],
+const X_VARIANTS = {
+  iris:        (p) => [p.ix, p.iy],
+  'iris+head': (p) => [p.ix, p.iy, p.yaw],
+};
+const Y_VARIANTS = {
+  iris:          (p) => [p.iy, p.ix],
+  'iris+lid':    (p) => [p.iy, p.ix, p.ap],           // the lid is the missing vertical cue
+  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch],
 };
 
-function buildModel(points) {
+/**
+ * Fit one axis. Standardise, quadratic in the first two dimensions, ridge chosen by leave-one-out.
+ * Returns the variant that best predicts a point it has never seen.
+ */
+function fitAxis(points, target, variants) {
   const all = points.map((_, i) => i);
   let best = null;
-  const looByVariant = {};
+  const loo = {};
 
-  for (const [name, extract] of Object.entries(VARIANTS)) {
+  for (const [name, extract] of Object.entries(variants)) {
     const raw = points.map(extract);
     const dim = raw[0].length;
-
-    // Standardise. Without this the quadratic terms are orders of magnitude smaller than the
-    // linear ones, the normal equations are garbage, and the solver answers with the twenty
-    // thousand pixel weights that started this whole mess.
     const mu = [], sg = [];
     for (let k = 0; k < dim; k++) {
       const col = raw.map((v) => v[k]);
@@ -211,45 +228,46 @@ function buildModel(points) {
     }
     const feat = (v) => {
       const z = v.map((x, k) => (x - mu[k]) / sg[k]);
-      // Quadratic in the first two dimensions (gaze-to-screen is mildly curved); linear in the
-      // rest. Nine points cannot support a full quadratic in four variables.
-      return [1, ...z, z[0] * z[0], z[1] * z[1], z[0] * z[1]];
+      return [1, ...z, z[0] * z[0], z[0] * z[1]];
     };
+    const fit = (idx, lambda) =>
+      ridgeSolve(idx.map((i) => feat(raw[i])), idx.map((i) => target[i]), lambda);
 
-    const fit = (idx, lambda) => {
-      const X = idx.map((i) => feat(raw[i]));
-      return {
-        wx: ridgeSolve(X, idx.map((i) => points[i].x), lambda),
-        wy: ridgeSolve(X, idx.map((i) => points[i].y), lambda),
-      };
-    };
-
-    for (const lambda of [0.01, 0.03, 0.1, 0.3, 1, 3, 10]) {
+    for (const lambda of [0.03, 0.1, 0.3, 1, 3, 10]) {
       let err = 0;
       for (let k = 0; k < points.length; k++) {
-        const m = fit(all.filter((i) => i !== k), lambda);
-        const f = feat(raw[k]);
-        err += Math.hypot(dotv(m.wx, f) - points[k].x, dotv(m.wy, f) - points[k].y);
+        const w = fit(all.filter((i) => i !== k), lambda);
+        err += Math.abs(dotv(w, feat(raw[k])) - target[k]);
       }
       err /= points.length;
-      if (!looByVariant[name] || err < looByVariant[name]) looByVariant[name] = Math.round(err);
+      if (loo[name] === undefined || err < loo[name]) loo[name] = Math.round(err);
       if (!best || err < best.err) best = { err, lambda, name, extract, feat, fit };
     }
   }
 
-  const m = best.fit(all, best.lambda);
+  const w = best.fit(all, best.lambda);
+  return {
+    loo, name: best.name, err: Math.round(best.err), lambda: best.lambda,
+    predict: (p) => dotv(w, best.feat(best.extract(p))),
+    weightMax: Math.round(Math.max(...[...w].map(Math.abs))),
+  };
+}
+
+function buildModel(points) {
+  const X = fitAxis(points, points.map((p) => p.x), X_VARIANTS);
+  const Y = fitAxis(points, points.map((p) => p.y), Y_VARIANTS);
 
   return {
-    looErrorPx: Math.round(best.err),
-    lambda: best.lambda,
-    variant: best.name,
-    looByVariant,
-    weightMax: Math.round(Math.max(...m.wx.map(Math.abs), ...m.wy.map(Math.abs))),
+    looErrorPx: Math.round(Math.hypot(X.err, Y.err)),
+    errX: X.err, errY: Y.err,
+    variant: `x:${X.name} y:${Y.name}`,
+    looByVariant: { x: X.loo, y: Y.loo },
+    lambda: `${X.lambda}/${Y.lambda}`,
+    weightMax: Math.max(X.weightMax, Y.weightMax),
     predict(p) {
-      const f = best.feat(best.extract(p));
       return [
-        Math.max(0, Math.min(window.innerWidth, dotv(m.wx, f))),
-        Math.max(0, Math.min(window.innerHeight, dotv(m.wy, f))),
+        Math.max(0, Math.min(window.innerWidth, X.predict(p))),
+        Math.max(0, Math.min(window.innerHeight, Y.predict(p))),
       ];
     },
   };
@@ -435,7 +453,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    const [rx, ry] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3] });
+    const [rx, ry] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3], ap: f.v[4] });
 
     const now = performance.now();
     const [mx, my] = median(rx, ry);
@@ -499,18 +517,20 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     },
 
     /** Look at each dot. We record what his eyes LOOK LIKE at each, then interpolate between. */
-    async calibrate() {
+    /** targets: normalised [x,y] points to look at. The app passes the real tile centres. */
+    async calibrate(targets) {
       if (!running) return false;
+      const CAL = (targets?.length >= 6) ? targets : DEFAULT_CAL;
       const points = [];
 
-      for (let i = 0; i < CAL_POINTS.length; i++) {
-        const [px, py] = CAL_POINTS[i];
-        onCalibrationProgress({ index: i, total: CAL_POINTS.length, x: px, y: py, state: 'settle' });
+      for (let i = 0; i < CAL.length; i++) {
+        const [px, py] = CAL[i];
+        onCalibrationProgress({ index: i, total: CAL.length, x: px, y: py, state: 'settle' });
         await new Promise((r) => setTimeout(r, SETTLE_MS));
 
         calBucket = [];
         calibrating = true;
-        onCalibrationProgress({ index: i, total: CAL_POINTS.length, x: px, y: py, state: 'sampling' });
+        onCalibrationProgress({ index: i, total: CAL.length, x: px, y: py, state: 'sampling' });
 
         await new Promise((resolve) => {
           const check = setInterval(() => {
@@ -533,7 +553,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
           med.push(col[Math.floor(col.length / 2)]);
         }
         points.push({
-          ix: med[0], iy: med[1], yaw: med[2], pitch: med[3],
+          ix: med[0], iy: med[1], yaw: med[2], pitch: med[3], ap: med[4],
           x: px * window.innerWidth, y: py * window.innerHeight,
           n: keep.length,
         });
@@ -547,12 +567,16 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       // number (5px) was the model grading itself on data it had memorised. This one cannot lie.
       const errorPx = model.looErrorPx;
 
-      // Half a tile is the bar. Wider than that and the wrong word gets spoken in his voice.
-      const tileW = window.innerWidth / 4, tileH = window.innerHeight / 2;
-      const usable = errorPx < Math.min(tileW, tileH) * 0.5;
+      // Judge each axis against ITS OWN tile dimension. Horizontal was already fine (74px in a
+      // 378px tile) while vertical was failing (121px, with 300px outliers) — and one blended
+      // number hid that completely for three rounds.
+      const t = document.querySelector('.tile')?.getBoundingClientRect();
+      const tileW = t?.width || window.innerWidth / 4;
+      const tileH = t?.height || window.innerHeight / 2;
+      const usable = model.errX < tileW * 0.45 && model.errY < tileH * 0.45;
 
       onCalibrationProgress({
-        state: 'done', errorPx, usable, backend,
+        state: 'done', errorPx, usable, backend, errX: model.errX, errY: model.errY,
         lambda: model.lambda, weightMax: model.weightMax,
         variant: model.variant, looByVariant: model.looByVariant,
         tile: { w: Math.round(tileW), h: Math.round(tileH) },
@@ -562,7 +586,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         points: points.map((p) => ({
           x: Math.round(p.x), y: Math.round(p.y),
           ix: +p.ix.toFixed(4), iy: +p.iy.toFixed(4),
-          yaw: +p.yaw.toFixed(4), pitch: +p.pitch.toFixed(4),
+          yaw: +p.yaw.toFixed(4), pitch: +p.pitch.toFixed(4), ap: +p.ap.toFixed(4),
         })),
       });
       return true;

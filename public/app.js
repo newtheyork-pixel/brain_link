@@ -538,10 +538,15 @@ async function startGaze() {
         // not his eyes — and that is a fact about him, not a bug to hide.
         const by = Object.entries(p.looByVariant ?? {}).map(([k, v]) => `${k} ${v}px`).join(' · ');
         $('#gaze-state').textContent =
-          `±${p.errorPx}px using ${p.variant} (tile ${p.tile.w}x${p.tile.h}) · ${p.usable ? 'usable' : 'TOO LOOSE'}\n${by}`;
-        const msg = p.usable
-          ? `Calibrated to about ${p.errorPx} pixels. Now run the test.`
-          : `Calibration is too loose: ${p.errorPx} pixels, and a tile is only ${p.tile.w} wide. Sit still, keep your head steady, and calibrate again.`;
+          `X ±${p.errX}px / Y ±${p.errY}px (tile ${p.tile.w}x${p.tile.h}) · ${p.variant} · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+        // Judge each axis against its OWN tile dimension. Horizontal was already fine while
+        // vertical was failing, and a single blended number hid that completely.
+        const okX = p.errX < p.tile.w * 0.45, okY = p.errY < p.tile.h * 0.45;
+        const msg = (okX && okY)
+          ? `Calibrated. Now run the test.`
+          : !okX && !okY ? `Calibration is too loose in both directions. Sit still and try again.`
+          : okX ? `Left and right is good, but up and down is too loose. Keep your head level and try again.`
+          : `Up and down is good, but left and right is too loose. Try again.`;
         toast(msg);
         say(msg, { instant: true, keep: true });
         fetch('/api/gazelog', {
@@ -885,7 +890,21 @@ $('#driver').onchange = (e) => {
   if (state.driver === 'gaze') startGaze(); else stopGaze();
   renderGrid();
 };
-$('#calibrate').onclick = () => gaze?.calibrate();
+$('#calibrate').onclick = () => {
+  // Calibrate on the REAL tile centres, plus the centre and a ring just outside them. He never
+  // looks at the corner of the glass; he looks at words. Teach the model where the words are.
+  const t = $$('.tile').map((el) => {
+    const r = el.getBoundingClientRect();
+    return [(r.left + r.width / 2) / window.innerWidth, (r.top + r.height / 2) / window.innerHeight];
+  });
+  const targets = t.length === 8
+    ? [[0.5, 0.5], ...t,
+       // a modest ring outside the grid, so the fit interpolates across his working area
+       // instead of extrapolating past the last thing it has ever seen
+       [0.06, 0.5], [0.94, 0.5], [0.5, 0.14], [0.5, 0.88]]
+    : null;
+  gaze?.calibrate(targets);
+};
 $('#test-gaze').onclick = testGazeAccuracy;
 $('#signal-check').onclick = signalCheck;
 $('#dwell').oninput = (e) => {
