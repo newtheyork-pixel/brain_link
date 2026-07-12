@@ -151,6 +151,7 @@ async function pick(tile) {
 const norm = (s) => String(s).toLowerCase().trim();
 
 function undo() {
+  retractIfRecent();   // he's correcting a pick — don't let the map learn the mistake
   if (!state.selected.length) return;
   state.selected.pop();
   renderSelected();
@@ -588,18 +589,41 @@ function onGazePoint(x, y, locked) {
   const frac = Math.min(1, (performance.now() - dwellStart) / state.dwellMs);
   $$('.tile')[i]?.style.setProperty('--dwell', String(frac));
   if (frac >= 1) {
-    // He just told us where he was looking: the tile he picked. The gap between its centre and
-    // his measured gaze is the CURRENT bias — kill a fraction of it on every selection, and the
-    // slow-drift failure class (slumping, chair moves, light changes) never accumulates.
+    // He just told us where he was looking: the tile he picked. Two things happen with that free,
+    // correctly-labelled sample.
     const r = $$('.tile')[i]?.getBoundingClientRect();
-    if (r && dwellTrace.length > 3) {
-      const mx = dwellTrace.reduce((s2, p) => s2 + p[0], 0) / dwellTrace.length;
-      const my = dwellTrace.reduce((s2, p) => s2 + p[1], 0) / dwellTrace.length;
-      gaze?.nudge(r.left + r.width / 2 - mx, r.top + r.height / 2 - my);
+    if (r) {
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      if (dwellTrace.length > 3) {
+        const mx = dwellTrace.reduce((s2, p) => s2 + p[0], 0) / dwellTrace.length;
+        const my = dwellTrace.reduce((s2, p) => s2 + p[1], 0) / dwellTrace.length;
+        gaze?.nudge(cx - mx, cy - my);            // 1) instant DC re-anchor
+      }
+      // 2) LEARN it into the terrain map, at the CURRENT raw eye-features paired with the tile
+      // centre. Over hours this refits the whole model to how he actually sits. Remember the id
+      // so we can retract it if he immediately undoes the word (a mis-select is a poisoned label).
+      const raw = gaze?.raw();
+      if (raw) {
+        lastLearnId = gaze.learn(
+          { ix: raw[0], iy: raw[1], yaw: raw[2], pitch: raw[3], ap: raw[4], nx: raw[5], ny: raw[6], sc: raw[7] },
+          cx, cy);
+        lastLearnAt = performance.now();
+        scheduleGazeSave();
+      }
     }
     resetDwell();
     dwellTile = -2;                    // refractory: don't instantly re-fire on the same tile
     bus.emit('SELECT');
+  }
+}
+
+// If he undoes within a few seconds of a gaze pick, that selection was probably WRONG — retract
+// what we learned from it, or the map learns his mistakes.
+let lastLearnId = null, lastLearnAt = 0;
+function retractIfRecent() {
+  if (lastLearnId != null && performance.now() - lastLearnAt < 5000) {
+    gaze?.retract(lastLearnId);
+    lastLearnId = null;
   }
 }
 
@@ -644,8 +668,8 @@ async function startGaze() {
         // If his head never moved during calibration, the model is blind to head movement and it
         // WILL fall apart the moment he shifts in his chair. Say so.
         if (!p.headVaried) toast('Your head barely moved during the second pass — the model cannot correct for head movement. Calibrate again and move your head around.');
-        // Save it. He is going to live with this device; he should not have to re-teach it his
-        // own eyes every time he opens the app.
+        // Persist the fresh terrain immediately — he should never re-teach the app his own eyes.
+        scheduleGazeSave();
         fetch('/api/gazelog', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ kind: 'calibration', ...p,
@@ -710,8 +734,34 @@ async function startGaze() {
   if (g !== gaze) return;
   if (!ok) { gaze = null; return; }
   $('#gaze-row').hidden = false;
-  $('#gaze-state').textContent = `Camera on (${g.backend}) — not calibrated yet.`;
-  toast('Camera on. Calibrate before selecting with your eyes.');
+
+  // Restore the terrain map from last time — he should never re-teach the app his own eyes just
+  // because he reopened it. If it loads, he can select immediately; if not, he calibrates once.
+  const saved = loadGazeMap();
+  if (saved && g.import(saved)) {
+    $('#gaze-state').textContent = `Camera on (${g.backend}) — remembered your eyes (${g.terrainSize} samples). Recenter if the dot is off.`;
+    toast('Welcome back — your eye calibration was remembered.');
+  } else {
+    $('#gaze-state').textContent = `Camera on (${g.backend}) — not calibrated yet.`;
+    toast('Camera on. Calibrate before selecting with your eyes.');
+  }
+}
+
+/* ---------- the terrain map, persisted ---------- */
+
+const GAZE_KEY = 'stillme.gaze.v2';
+let gazeSaveTimer = null;
+function scheduleGazeSave() {
+  clearTimeout(gazeSaveTimer);
+  gazeSaveTimer = setTimeout(() => {
+    try {
+      const m = gaze?.export();
+      if (m) localStorage.setItem(GAZE_KEY, JSON.stringify(m));
+    } catch { /* storage full or blocked — the in-memory map still works this session */ }
+  }, 4000);
+}
+function loadGazeMap() {
+  try { const s = localStorage.getItem(GAZE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
 }
 
 /**

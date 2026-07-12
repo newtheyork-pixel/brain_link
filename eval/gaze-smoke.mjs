@@ -52,4 +52,26 @@ err /= test.length;
 const ok = Number.isFinite(err) && err < 15;
 console.log(`  buildModel ran. held-out X±${m.errX} Y±${m.errY} · predict mean err ${err.toFixed(1)}px`);
 console.log(ok ? '  SMOKE TEST PASS' : '  SMOKE TEST FAIL');
-process.exit(ok ? 0 : 1);
+let allOk = ok;
+
+// --- continuous-learning sanity: refitting on accumulated real-use samples must not blow up ---
+{
+  const base = mk(200);
+  // simulate 500 "real selections": same generative model, fresh noise, appended over time
+  let pool = base.slice();
+  let worstErr = 0;
+  for (let batch = 0; batch < 5; batch++) {
+    pool = pool.concat(mk(100));
+    if (pool.length > 6000) pool = pool.slice(-6000);   // the cap
+    const cut = Math.floor(pool.length * 0.8);
+    const m2 = buildModel(pool.slice(0, cut), pool.slice(cut));
+    let e = 0; for (const s of pool.slice(cut)) { const [x,y] = m2.predict(s); e += Math.hypot(x-s.x, y-s.y); }
+    e /= pool.slice(cut).length;
+    worstErr = Math.max(worstErr, e);
+  }
+  const ok2 = Number.isFinite(worstErr) && worstErr < 20;
+  console.log(`  continuous refit over 700 samples: worst held-out ${worstErr.toFixed(1)}px`);
+  console.log(ok2 ? '  LEARNING SMOKE PASS' : '  LEARNING SMOKE FAIL');
+  allOk = allOk && ok2;
+}
+process.exit(allOk ? 0 : 1);

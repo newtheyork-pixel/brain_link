@@ -378,6 +378,28 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   let running = false, calibrating = false, cancelled = false;
   let model = null;                       // the eye→screen map, once calibrated
   let bias = { x: 0, y: 0 };              // constant drift correction, from recenter()
+
+  // THE TERRAIN MAP. Every (eye-features -> screen-point) pair we have ever trusted lives here:
+  // the calibration pursuit at the start, PLUS every real selection he has made since. Over hours
+  // of ordinary use it fills in the map across every posture and light he actually sits in — which
+  // one pristine calibration never covers. The model is refit from this store, so it gets better
+  // the more he uses it, without him ever recalibrating.
+  let terrain = [];
+  const TERRAIN_CAP = 6000;               // keep it current: old samples fall off the front
+  const REFIT_EVERY = 25;                 // refit after this many new real-use samples
+  let sinceRefit = 0, learnId = 0;
+
+  function rebuild() {
+    if (terrain.length < 100) return false;
+    // Split by TIME, not at random: the newest fifth is the held-out test. A random split would
+    // leak — two samples from the same second are near-copies, and testing on a near-copy of a
+    // training point reports a dishonestly low error.
+    const cut = Math.floor(terrain.length * 0.8);
+    const train = terrain.slice(0, cut), test = terrain.slice(cut);
+    if (train.length < 60 || test.length < 20) return false;
+    model = buildModel(train, test);
+    return true;
+  }
   let median = makeMedian();
   let fixate = makeFixation();
   let lastTs = -1;
@@ -654,6 +676,10 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         return false;
       }
 
+      // Seed the terrain with the pursuit samples (tagged so a fresh calibration can clear them
+      // without wiping the real-use history if we ever want to keep it).
+      terrain = [...train, ...test].map((s) => ({ ...s, cal: true }));
+      sinceRefit = 0;
       model = buildModel(train, test);
       median = makeMedian();
       fixate = makeFixation();
@@ -681,6 +707,46 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
 
     get calibrating() { return calibrating; },
     cancelCalibration() { cancelled = true; },
+
+    /**
+     * LEARN FROM A REAL SELECTION. He dwelled inside a tile and confirmed it, so his gaze WAS at
+     * that tile — a free, correctly-labelled training point, collected in the exact posture and
+     * light he actually uses. Append it and, every so often, refit the whole map.
+     *
+     * Returns an id so the caller can RETRACT this sample if he immediately undoes the word — a
+     * mis-selection he corrects is a poisoned label, and learning from it would make the map worse.
+     */
+    learn(featureObj, screenX, screenY) {
+      if (!model || !lastRaw) return null;
+      const id = ++learnId;
+      terrain.push({
+        ix: featureObj.ix, iy: featureObj.iy, yaw: featureObj.yaw, pitch: featureObj.pitch,
+        ap: featureObj.ap, nx: featureObj.nx, ny: featureObj.ny, sc: featureObj.sc,
+        x: screenX, y: screenY, id,
+      });
+      if (terrain.length > TERRAIN_CAP) terrain.shift();
+      if (++sinceRefit >= REFIT_EVERY) { sinceRefit = 0; rebuild(); }
+      return id;
+    },
+
+    /** He undid the word — that selection was wrong, so drop what we "learned" from it. */
+    retract(id) {
+      if (id == null) return;
+      const i = terrain.findIndex((s) => s.id === id);
+      if (i >= 0) terrain.splice(i, 1);
+    },
+
+    /** Persist / restore the whole terrain map, so he never re-teaches the app his own eyes. */
+    export() { return model ? { v: 2, terrain, bias } : null; },
+    import(saved) {
+      if (!saved?.terrain?.length) return false;
+      terrain = saved.terrain.slice(-TERRAIN_CAP);
+      bias = saved.bias ?? { x: 0, y: 0 };
+      median = makeMedian();
+      fixate = makeFixation();
+      return rebuild();
+    },
+    get terrainSize() { return terrain.length; },
 
     recalibrate() { model = null; bias = { x: 0, y: 0 }; },
 
