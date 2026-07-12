@@ -8,68 +8,45 @@
 </head>
 <body>
 
+<!-- Three choices, and they are the whole app: react to them, ask them something, or say
+     something of your own. Everything a caregiver or researcher needs is behind the gear.
+     A man with 40 seconds a word should never spend one of them on a settings checkbox. -->
 <header>
-  <div class="who">
-    <strong id="who-name">—</strong>
-    <span id="voice-state" class="badge warn">placeholder voice</span>
+  <div class="modes" role="tablist" aria-label="What do you want to do">
+    <button id="m-answer" class="mode on" role="tab" aria-selected="true">Answer them</button>
+    <button id="m-ask"    class="mode"    role="tab" aria-selected="false">Ask something</button>
+    <button id="m-tell"   class="mode"    role="tab" aria-selected="false">Say something</button>
   </div>
-  <div class="controls">
-    <label class="toggle">
-      <input type="checkbox" id="literal">
-      <span>Literal mode</span>
-    </label>
-    <label class="toggle">
-      <input type="checkbox" id="predictive" checked>
-      <span>Predictive tiles</span>
-    </label>
-    <select id="driver" aria-label="Input method">
-      <option value="touch">Input: Touch</option>
-      <option value="scan">Input: Scanning (EOG)</option>
-    </select>
-  </div>
+  <button id="gear" class="gear" aria-label="Settings" aria-expanded="false">⚙</button>
 </header>
 
-<!-- Everything else in this app generates tiles from what SOMEONE ELSE said, which can only
-     ever make him a responder. These two buttons are the only way he gets to start. -->
-<section class="modes" role="tablist" aria-label="What do you want to do">
-  <button id="m-answer" class="mode on" role="tab" aria-selected="true">Answer them</button>
-  <button id="m-ask"    class="mode"    role="tab" aria-selected="false">Ask something</button>
-  <button id="m-tell"   class="mode"    role="tab" aria-selected="false">Say something</button>
-</section>
-
 <section class="partner" id="partner-block">
-  <label for="partner-said">They said to you</label>
   <div class="hear-row">
-    <input id="partner-said" type="text" placeholder="Tap Listen — or type it" autocomplete="off">
+    <input id="partner-said" type="text" placeholder="What did they say to you?" autocomplete="off">
     <!-- Nobody transcribes their own sentence into a box. The room is listened to. -->
     <button id="listen" class="listen" aria-pressed="false">Listen</button>
   </div>
 </section>
 
-<!-- THE PARTNER'S VIEW. He needs ~40 seconds per word; the other person is standing there
-     in silence with no idea anything is happening, so they fill it, or they leave. This
-     strip is what makes them wait. -->
+<!-- THE PARTNER'S VIEW. He needs ~40 seconds per word; without this the other person is
+     watching a man stare at a screen with no idea a sentence is underway — so they fill the
+     silence, or they leave. This is what makes them wait. -->
 <section id="composing" class="composing" hidden aria-live="polite">
   <span class="pulse"></span>
-  <span class="composing-label">Ray is saying…</span>
   <strong id="composing-words"></strong>
-</section>
-
-<section class="utterance" aria-live="polite">
-  <div id="selected" class="chips" role="list"></div>
-  <button id="undo" class="ghost" disabled>Undo</button>
+  <button id="undo" class="undo">Undo</button>
 </section>
 
 <main id="grid" class="grid" role="group" aria-label="Word tiles"></main>
 
 <section class="actions">
-  <!-- He cannot raise a hand or clear his throat. Without this he cannot get into a
-       conversation at all — he can only ever answer one. -->
+  <!-- He cannot raise a hand or clear his throat. Without this he can never ENTER a
+       conversation — only ever answer one somebody else started. -->
   <button id="hold" class="hold">Wait — I'm talking</button>
-  <button id="compose" class="primary" disabled>Build sentence</button>
+  <button id="compose" class="primary" disabled>Say it</button>
   <!-- Always reachable. If the grid is about Emma's graduation and he can't breathe,
        a predicted grid would trap him. No amount of tile quality fixes that. -->
-  <button id="urgent" class="urgent" aria-label="Urgent needs">Urgent</button>
+  <button id="urgent" class="urgent">Urgent</button>
 </section>
 
 <!-- Nothing is ever spoken without him choosing it. -->
@@ -80,16 +57,40 @@
   <button id="cancel" class="ghost">Back</button>
 </div>
 
-<footer id="hud">
-  <span><b id="m-sel">0</b> selections</span>
-  <span><b id="m-time">0.0</b>s</span>
-  <span><b id="m-wpm">—</b> wpm</span>
-  <span id="m-src" class="src"></span>
-</footer>
+<!-- Caregiver + researcher controls. Out of his way. -->
+<aside id="settings" class="settings" hidden>
+  <h2>Settings</h2>
+  <label class="row">
+    <input type="checkbox" id="literal">
+    <span><b>Literal mode</b><em>Say exactly my words. Add nothing.</em></span>
+  </label>
+  <label class="row">
+    <input type="checkbox" id="predictive" checked>
+    <span><b>Predictive tiles</b><em>Off = the same fixed board every turn.</em></span>
+  </label>
+  <label class="row">
+    <span><b>Input</b><em>How he selects.</em></span>
+    <select id="driver">
+      <option value="touch">Touch</option>
+      <option value="scan">Scanning (eye / switch)</option>
+    </select>
+  </label>
+  <p class="who"><span id="who-name">—</span> · <span id="voice-state">placeholder voice</span></p>
+  <p class="hud"><b id="m-sel">0</b> selections · <b id="m-time">0.0</b>s · <span id="m-src"></span></p>
+  <button id="close-settings" class="ghost">Done</button>
+</aside>
+
+<!-- What he just said, on screen. The room can read it even if they missed the audio,
+     and it proves the app is working when the speakers are muted. -->
+<div id="spoken" class="spoken" hidden aria-live="polite"></div>
+
+<!-- Failures used to be silent: the mic was blocked, the audio was blocked, and the app
+     just sat there. Never fail quietly at a bedside. -->
+<div id="toast" class="toast" hidden role="status"></div>
 
 <div id="scan-help" class="scan-help" hidden>
   Arrow keys move &middot; Space selects &middot; Backspace undoes
-  <em>— the exact alphabet the EOG board will send</em>
+  <em>— the alphabet the EOG board will send</em>
 </div>
 
 <script type="module" src="/app.js"></script>

@@ -1,39 +1,40 @@
-/* Bedside device. Big type, high contrast, no decoration that costs a selection. */
+/* Bedside device.
+   The tiles ARE the app. Everything else gets out of the way — a man with 40 seconds a
+   word should never spend one of them reading chrome. */
 :root {
   --bg: #0F1115; --surface: #191D24; --line: #2A303A;
   --ink: #EDF0F4; --muted: #8C95A3;
-  --accent: #5B8DEF; --gold: #E0B354; --warn: #C9803F; --danger: #D95A4A;
+  --accent: #5B8DEF; --gold: #E0B354; --danger: #D95A4A;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--ink);
   font: 18px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-  min-height: 100vh; display: flex; flex-direction: column;
-  padding: 16px 20px 0; gap: 14px; -webkit-font-smoothing: antialiased;
+  height: 100vh; display: flex; flex-direction: column;
+  padding: 14px 18px; gap: 12px; -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
-header { display: flex; justify-content: space-between; align-items: center;
-  flex-wrap: wrap; gap: 12px; }
-.who { display: flex; align-items: center; gap: 10px; }
-.who strong { font-size: 20px; }
-.badge { font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
-  padding: 3px 8px; border-radius: 99px; font-weight: 700; }
-.badge.warn { background: rgba(201,128,63,.16); color: var(--warn); }
-.controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.toggle { display: flex; align-items: center; gap: 6px; font-size: 14px;
-  color: var(--muted); cursor: pointer; }
-.toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
-select { background: var(--surface); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 8px; padding: 7px 10px; font-size: 14px; }
+header { display: flex; gap: 10px; align-items: stretch; }
+.modes { display: flex; gap: 8px; flex: 1; }
+button.mode { flex: 1; background: var(--surface); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 12px; padding: 13px 10px;
+  font-size: 17px; font-weight: 650; cursor: pointer; }
+button.mode:hover { color: var(--ink); }
+button.mode.on { background: rgba(91,141,239,.14); border-color: var(--accent);
+  color: var(--accent); }
+button.gear { background: transparent; border: 1px solid var(--line); border-radius: 12px;
+  color: var(--muted); width: 48px; font-size: 20px; cursor: pointer; flex: none; }
+button.gear:hover { color: var(--ink); border-color: var(--accent); }
 
-.partner label { display: block; font-size: 11px; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--muted); font-weight: 700; margin-bottom: 5px; }
+.partner[hidden] { display: none; }
 .hear-row { display: flex; gap: 10px; }
 .partner input { flex: 1; background: var(--surface); border: 1px solid var(--line);
-  border-radius: 10px; padding: 12px 14px; color: var(--ink); font-size: 17px; }
+  border-radius: 12px; padding: 14px 16px; color: var(--ink); font-size: 18px; }
+.partner input::placeholder { color: var(--muted); }
 .partner input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button.listen { background: var(--surface); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 10px; padding: 12px 22px; font-size: 15px; font-weight: 650; cursor: pointer;
+  border-radius: 12px; padding: 14px 24px; font-size: 16px; font-weight: 650; cursor: pointer;
   white-space: nowrap; }
 button.listen.on { border-color: var(--accent); color: var(--accent);
   background: rgba(91,141,239,.10); }
@@ -41,97 +42,105 @@ button.listen.on::before { content: ""; display: inline-block; width: 8px; heigh
   border-radius: 50%; background: var(--accent); margin-right: 8px;
   animation: pulse 1.4s ease-in-out infinite; }
 
-/* The partner's window into a mind that is working. This is read from across a room by
-   someone who is deciding, right now, whether to keep waiting. Make it unmissable. */
-.composing { display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+/* The other person's window into a mind that is working. Read from across a room by someone
+   deciding right now whether to keep waiting. It also holds his words and his Undo — one
+   place, not three. */
+.composing { display: flex; align-items: center; gap: 14px; padding: 14px 16px;
   background: rgba(224,179,84,.10); border: 1px solid rgba(224,179,84,.35);
   border-radius: 12px; }
+.composing[hidden] { display: none; }   /* an author display: beats [hidden] — say it here */
 .composing .pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--gold);
   animation: pulse 1.2s ease-in-out infinite; flex: none; }
-.composing-label { color: var(--gold); font-size: 14px; font-weight: 700;
-  letter-spacing: .04em; white-space: nowrap; }
-.composing strong { font-size: 24px; color: var(--ink); font-weight: 650; }
+.composing strong { flex: 1; font-size: 26px; font-weight: 650; }
+button.undo { background: transparent; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 10px; padding: 9px 18px; font-size: 15px; cursor: pointer; flex: none; }
+button.undo:hover { color: var(--ink); }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
-@media (prefers-reduced-motion: reduce) {
-  .composing .pulse, button.listen.on::before { animation: none; }
-}
-
-.utterance { display: flex; align-items: center; gap: 12px; min-height: 62px;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
-  padding: 10px 12px; }
-.chips { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
-.chip { background: rgba(91,141,239,.14); color: var(--accent); font-weight: 650;
-  font-size: 22px; padding: 6px 14px; border-radius: 8px; }
 
 .grid { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
-  grid-auto-rows: 1fr; gap: 12px; min-height: 320px; }
-.tile { background: var(--surface); border: 2px solid var(--line); border-radius: 14px;
-  color: var(--ink); font-size: 28px; font-weight: 600; cursor: pointer;
-  padding: 18px 10px; transition: transform .06s, border-color .12s; }
+  grid-template-rows: repeat(2, 1fr); gap: 12px; min-height: 0; }
+.tile { position: relative; background: var(--surface); border: 2px solid var(--line);
+  border-radius: 16px; color: var(--ink); font-size: clamp(20px, 2.4vw, 30px);
+  font-weight: 600; cursor: pointer; padding: 12px 10px;
+  transition: transform .06s, border-color .12s; overflow: hidden; }
 .tile:hover { border-color: var(--accent); }
 .tile:active { transform: scale(.97); }
 .tile.cursor { border-color: var(--gold); background: rgba(224,179,84,.12);
   box-shadow: 0 0 0 3px rgba(224,179,84,.2); }
 .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-/* Pinned core tiles: same position, every grid, forever. That is what makes them
-   memorizable — and a memorized tile is a tile he doesn't have to read. */
-.tile.pinned { border-color: rgba(91,141,239,.35); }
-.tile.pinned::after { content: ""; position: absolute; top: 8px; right: 10px;
+/* Pinned tiles never move — a memorized tile is one he doesn't have to read. */
+.tile.pinned::after { content: ""; position: absolute; top: 9px; right: 11px;
   width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: .5; }
-.tile { position: relative; }
-
 .tile.urgent-tile { border-color: rgba(217,90,74,.5); background: rgba(217,90,74,.10); }
-.tile.urgent-tile:hover { border-color: var(--danger); }
-body.in-urgent .partner, body.in-urgent .utterance { opacity: .35; pointer-events: none; }
+body.in-urgent .partner, body.in-urgent .composing { opacity: .3; pointer-events: none; }
 
-.actions { display: flex; gap: 12px; }
+.actions { display: flex; gap: 10px; }
 button.primary { flex: 1; background: var(--accent); color: #0B0E13; border: 0;
-  border-radius: 12px; padding: 18px; font-size: 20px; font-weight: 700; cursor: pointer; }
-button.primary:disabled { opacity: .32; cursor: default; }
+  border-radius: 14px; padding: 20px; font-size: 21px; font-weight: 700; cursor: pointer; }
+button.primary:disabled { opacity: .3; cursor: default; }
 button.urgent { background: transparent; color: var(--danger); border: 2px solid var(--danger);
-  border-radius: 12px; padding: 18px 28px; font-size: 18px; font-weight: 700; cursor: pointer; }
+  border-radius: 14px; padding: 20px 26px; font-size: 18px; font-weight: 700; cursor: pointer;
+  flex: none; }
 button.urgent:hover { background: rgba(217,90,74,.12); }
 body.in-urgent button.urgent { background: var(--danger); color: #12151A; }
-button.hold { background: transparent; color: var(--gold); border: 2px solid rgba(224,179,84,.5);
-  border-radius: 12px; padding: 18px 24px; font-size: 17px; font-weight: 700; cursor: pointer;
-  white-space: nowrap; }
+button.hold { background: transparent; color: var(--gold);
+  border: 2px solid rgba(224,179,84,.5); border-radius: 14px; padding: 20px 22px;
+  font-size: 17px; font-weight: 700; cursor: pointer; white-space: nowrap; flex: none; }
 button.hold:hover { background: rgba(224,179,84,.12); border-color: var(--gold); }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
-  border-radius: 10px; padding: 10px 16px; font-size: 15px; cursor: pointer; }
-button.ghost:disabled { opacity: .35; cursor: default; }
+  border-radius: 10px; padding: 11px 20px; font-size: 15px; cursor: pointer; }
 
-.sheet { position: fixed; inset: 0; background: rgba(10,12,16,.92); z-index: 10;
+.sheet { position: fixed; inset: 0; background: rgba(10,12,16,.94); z-index: 20;
   display: flex; flex-direction: column; justify-content: center; align-items: center;
   gap: 14px; padding: 24px; }
-/* An author `display` beats the UA sheet's [hidden]{display:none} — so say it here,
-   or the overlay covers the page from load and swallows every click. */
 .sheet[hidden] { display: none; }
 .sheet h2 { margin: 0; font-size: 26px; }
 .sheet-note { margin: 0; color: var(--muted); font-size: 15px; }
-.candidates { display: flex; flex-direction: column; gap: 12px; width: min(680px, 100%); }
+.candidates { display: flex; flex-direction: column; gap: 12px; width: min(720px, 100%); }
 .candidate { background: var(--surface); border: 2px solid var(--line); border-radius: 14px;
-  color: var(--ink); font-size: 24px; line-height: 1.35; padding: 22px; text-align: left;
+  color: var(--ink); font-size: 25px; line-height: 1.35; padding: 24px; text-align: left;
   cursor: pointer; }
 .candidate:hover { border-color: var(--gold); }
 
-footer { display: flex; gap: 20px; align-items: center; color: var(--muted);
-  font-size: 13px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
-footer b { color: var(--ink); font-variant-numeric: tabular-nums; font-size: 15px; }
-.src { margin-left: auto; font-variant-numeric: tabular-nums; }
+/* Caregiver + researcher controls. Never in his way. */
+.settings { position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 100%);
+  background: var(--surface); border-left: 1px solid var(--line); z-index: 30;
+  padding: 26px; display: flex; flex-direction: column; gap: 18px; overflow-y: auto; }
+.settings[hidden] { display: none; }
+.settings h2 { margin: 0; font-size: 22px; }
+.settings .row { display: flex; align-items: center; gap: 12px; cursor: pointer;
+  padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.settings .row span { flex: 1; display: flex; flex-direction: column; }
+.settings .row b { font-size: 16px; font-weight: 650; }
+.settings .row em { font-style: normal; font-size: 13px; color: var(--muted); }
+.settings input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); }
+.settings select { background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+.settings .who, .settings .hud { margin: 0; color: var(--muted); font-size: 13px;
+  font-variant-numeric: tabular-nums; }
+.settings .hud b { color: var(--ink); }
 
-.scan-help { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+.scan-help { position: fixed; bottom: 96px; left: 50%; transform: translateX(-50%);
   background: var(--surface); border: 1px solid var(--gold); border-radius: 10px;
-  padding: 10px 16px; font-size: 14px; color: var(--muted); white-space: nowrap; }
+  padding: 10px 16px; font-size: 14px; color: var(--muted); white-space: nowrap; z-index: 5; }
+.scan-help[hidden] { display: none; }
 .scan-help em { color: var(--gold); font-style: normal; }
 
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+  .composing .pulse, button.listen.on::before { animation: none; }
+}
 
-/* He can only ever REACT unless he can choose to start. These are that choice. */
-.modes { display: flex; gap: 8px; }
-button.mode { flex: 1; background: var(--surface); color: var(--muted);
-  border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px;
-  font-size: 15px; font-weight: 650; cursor: pointer; }
-button.mode:hover { color: var(--ink); }
-button.mode.on { background: rgba(91,141,239,.12); border-color: var(--accent);
-  color: var(--accent); }
+/* He said it — show it. Proves the app worked even with the volume down. */
+.spoken { position: fixed; left: 50%; bottom: 100px; transform: translateX(-50%);
+  background: var(--accent); color: #0B0E13; border-radius: 14px;
+  padding: 16px 28px; font-size: 26px; font-weight: 700; z-index: 15;
+  max-width: 88vw; text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,.5); }
+.spoken[hidden] { display: none; }
+
+/* Never fail quietly at a bedside. */
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  background: var(--danger); color: #12151A; border-radius: 10px;
+  padding: 12px 20px; font-size: 15px; font-weight: 650; z-index: 40;
+  max-width: 90vw; text-align: center; }
+.toast[hidden] { display: none; }

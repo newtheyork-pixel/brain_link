@@ -25,6 +25,7 @@ const state = {
   listening: false,
   mode: 'answer',   // answer | ask | tell — the only way he gets to start a conversation
   coreSlots: 2,   // how many tiles never move. Motor learning vs prediction — a measured knob.
+  pinned: 0,      // how many the server actually pinned this turn
   startedAt: null,
   selections: 0,
   profile: null,
@@ -116,8 +117,9 @@ async function loadTiles() {
       mode: state.mode,
     }),
   });
-  const { tiles, source, ms } = await res.json();
+  const { tiles, source, ms, coreSlots } = await res.json();
   state.tiles = tiles.slice(0, GRID);
+  state.pinned = coreSlots ?? 0;   // the SERVER decides; the client was inventing pins
   state.cursor = 0;
   $('#m-src').textContent = source === 'predicted' ? `predicted ${ms}ms`
     : source === 'fallback' ? 'model down — fallback tiles' : source;
@@ -168,7 +170,7 @@ function setMode(mode) {
   // Hide the "they said to you" box when he is the one starting — it isn't his turn to
   // react, and leaving it there quietly reframes his question as an answer.
   $('#partner-block').hidden = mode !== 'answer';
-  $('#compose').textContent = mode === 'ask' ? 'Ask it' : 'Build sentence';
+  $('#compose').textContent = mode === 'ask' ? 'Ask it' : 'Say it';
   renderSelected();
   renderComposing();
   renderHUD();
@@ -192,6 +194,11 @@ function showConfirm(candidates) {
 
 const closeConfirm = () => { $('#confirm').hidden = true; $('#compose').focus(); };
 
+// Hold the reference at module scope. A local `const audio` inside an async function can be
+// garbage-collected the moment the function returns — the sound just never comes out, with
+// no error anywhere. This is the classic silent-audio bug and it is why nothing was speaking.
+let player = null;
+
 async function say(text, { instant = false } = {}) {
   closeConfirm();
   const elapsed = (performance.now() - state.startedAt) / 1000;
@@ -202,13 +209,28 @@ async function say(text, { instant = false } = {}) {
   const wasListening = state.listening;
   if (wasListening) stopListening();
 
-  const res = await fetch('/api/speak', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text, voice: state.profile.voiceModel ? 'cloned' : 'placeholder' }),
-  });
-  const audio = new Audio(URL.createObjectURL(await res.blob()));
-  audio.onended = () => { if (wasListening) startListening(); };
-  audio.play();
+  try {
+    const res = await fetch('/api/speak', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, voice: state.profile?.voiceModel ? 'cloned' : 'placeholder' }),
+    });
+    if (!res.ok) throw new Error(`speak ${res.status}`);
+
+    const url = URL.createObjectURL(await res.blob());
+    player = new Audio(url);
+    player.onended = () => { URL.revokeObjectURL(url); if (wasListening) startListening(); };
+    // A rejected play() promise is how the browser tells you it blocked the sound. Ignore it
+    // and the app is simply mute forever with nothing in the console.
+    await player.play().catch((e) => {
+      toast(e.name === 'NotAllowedError'
+        ? 'Browser blocked the audio — tap anywhere, then try again.'
+        : `Could not play audio: ${e.message}`);
+      throw e;
+    });
+    speaking(text);
+  } catch (e) {
+    toast(`Speech failed: ${e.message}`);
+  }
 
   // The two numbers the research is about.
   fetch('/api/log', {
@@ -250,7 +272,10 @@ const SR = window.SpeechRecognition ?? window.webkitSpeechRecognition;
 let recog = null;
 
 function startListening() {
-  if (!SR || state.listening) return;
+  // It silently did nothing here. The button flipped back and the user was left guessing.
+  if (!SR) return toast('This browser cannot listen. Use Chrome, or type it.');
+  if (state.listening) return;
+
   recog = new SR();
   recog.continuous = true;
   recog.interimResults = true;
@@ -267,14 +292,47 @@ function startListening() {
     // thrashes under his finger while he is trying to aim at it.
     if (final && !state.selected.length) loadTiles();
   };
-  recog.onerror = (e) => { if (e.error !== 'no-speech') stopListening(); };
-  recog.onend = () => { if (state.listening) recog.start(); }; // Chrome times out; keep it alive
+  // Every one of these used to end in a silent stopListening(). The mic was denied, or
+  // offline, and the button just quietly turned itself off.
+  recog.onerror = (e) => {
+    if (e.error === 'no-speech') return;             // normal: a pause. keep listening.
+    const why = {
+      'not-allowed': 'Microphone blocked. Allow it in the address bar, then tap Listen.',
+      'service-not-allowed': 'Microphone blocked by the browser or OS.',
+      'audio-capture': 'No microphone found.',
+      'network': 'Speech service unreachable (Chrome sends audio to Google — needs network).',
+    }[e.error] ?? `Listening stopped: ${e.error}`;
+    toast(why);
+    stopListening();
+  };
+  recog.onend = () => { if (state.listening) { try { recog.start(); } catch {} } }; // Chrome times out; keep it alive
 
-  recog.start();
+  try { recog.start(); } catch (e) { return toast(`Could not start the mic: ${e.message}`); }
   state.listening = true;
   $('#listen').classList.add('on');
   $('#listen').textContent = 'Listening…';
   $('#listen').setAttribute('aria-pressed', 'true');
+}
+
+/* ---------- feedback ---------- */
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 5000);
+}
+
+// Show what he just said, so the room can read it even if they missed the audio —
+// and so YOU can see the app is working when the speakers are muted.
+function speaking(text) {
+  const el = $('#spoken');
+  el.textContent = `“${text}”`;
+  el.hidden = false;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.hidden = true; }, 6000);
 }
 
 function stopListening() {
@@ -295,7 +353,7 @@ function renderGrid() {
     const b = document.createElement('button');
     // Pinned tiles get a quiet marker: they are in the same place every single time,
     // which is what lets him stop reading the grid and start knowing it.
-    const pinned = !state.urgent && i < state.coreSlots;
+    const pinned = !state.urgent && i < state.pinned;
     b.className = 'tile'
       + (state.driver === 'scan' && i === state.cursor ? ' cursor' : '')
       + (pinned ? ' pinned' : '')
@@ -306,25 +364,17 @@ function renderGrid() {
   });
 }
 
+// His words live in ONE place — the same strip the other person reads. Two rows showing
+// the same sentence was just chrome between him and the tiles.
 function renderSelected() {
-  const box = $('#selected');
-  box.innerHTML = '';
-  for (const t of state.selected) {
-    const chip = document.createElement('span');
-    chip.className = 'chip';
-    chip.setAttribute('role', 'listitem');
-    chip.textContent = t;
-    box.appendChild(chip);
-  }
   $('#compose').disabled = !state.selected.length;
-  $('#undo').disabled = !state.selected.length;
+  renderComposing();
 }
 
-// What the OTHER person sees. Without it they are watching a man stare at a screen and
-// they have no idea he is halfway through a sentence — so they talk over him, or leave.
+// What the OTHER person sees. Without it they are watching a man stare at a screen with
+// no idea he is halfway through a sentence — so they talk over him, or they leave.
 function renderComposing() {
-  const on = state.selected.length > 0;
-  $('#composing').hidden = !on;
+  $('#composing').hidden = state.selected.length === 0;
   $('#composing-words').textContent = state.selected.join(' ');
 }
 
@@ -349,6 +399,15 @@ $('#undo').onclick = undo;
 $('#urgent').onclick = toggleUrgent;
 $('#cancel').onclick = closeConfirm;
 $('#listen').onclick = () => (state.listening ? stopListening() : startListening());
+$('#gear').onclick = () => {
+  const open = $('#settings').hidden;
+  $('#settings').hidden = !open;
+  $('#gear').setAttribute('aria-expanded', String(open));
+};
+$('#close-settings').onclick = () => {
+  $('#settings').hidden = true;
+  $('#gear').setAttribute('aria-expanded', 'false');
+};
 $('#m-answer').onclick = () => setMode('answer');
 $('#m-ask').onclick = () => setMode('ask');
 $('#m-tell').onclick = () => setMode('tell');

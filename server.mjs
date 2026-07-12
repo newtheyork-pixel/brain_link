@@ -74,9 +74,21 @@ const routes = {
 
     try {
       const t0 = Date.now();
-      const predicted = await predictTiles({ selected, partner, profile, mode });
-      const tiles = buildGrid({ core, predicted, coreSlots: slots });
-      json(res, 200, { tiles, source: mode === 'answer' ? 'predicted' : mode, ms: Date.now() - t0 });
+      // Ask for more than we need. Echo-stripping and synonym-dedupe both remove tiles,
+      // and a half-empty grid is a worse failure than a slightly weaker 8th tile —
+      // he only gets 8 chances to say anything at all.
+      let predicted = await predictTiles({ selected, partner, profile, mode, n: 12 });
+
+      // He is the one asking. He cannot answer his own question — and every "yes" tile on
+      // an ASK grid is one of his eight slots spent on a word he can never use.
+      // Enforced here, not just in the prompt: a rule that matters shouldn't depend on a
+      // model choosing to follow it.
+      if (mode !== 'answer') {
+        predicted = predicted.filter((t) => !/^(yes|no|yeah|nope|maybe|okay)$/i.test(String(t).trim()));
+      }
+
+      const tiles = buildGrid({ core, predicted, selected, coreSlots: slots });
+      json(res, 200, { tiles, source: mode === 'answer' ? 'predicted' : mode, ms: Date.now() - t0, coreSlots: slots });
     } catch (e) {
       // Never leave him staring at an empty grid because a model timed out.
       json(res, 200, { tiles: OPENERS, source: 'fallback', error: String(e.message) });
