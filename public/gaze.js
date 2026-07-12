@@ -59,52 +59,57 @@ function features(lm, face, matrix) {
   const b = {};
   for (const c of face) b[c.categoryName] = c.score;
 
-  // THE TWO EYES WERE CANCELLING EACH OTHER OUT.
+  // MEASURE IN 3D, IN THE EYE'S OWN FRAME.
   //
-  // I measured each iris as a fraction from the INNER corner toward the OUTER corner. But "outer"
-  // is in opposite image directions for the two eyes: for one eye the outer corner has a SMALLER
-  // x than the inner, for the other a LARGER one. So the two denominators carried opposite signs.
-  // When he looked right, both irises moved right in the image — and the two normalised readings
-  // moved in OPPOSITE directions and annihilated each other in the average.
+  // The 2D version measured the iris offset in IMAGE coordinates. But the iris sits in front of
+  // the plane of the eye corners — so when the head yaws, perspective shifts the projected iris
+  // relative to the corner midpoint even when the gaze has not moved. That parallax is exactly
+  // the +0.023 DC offset that wrecked the live test after a head-still calibration.
   //
-  // The measured proof: looking from the far left of the screen to the far right moved the signal
-  // by 0.0075. It should move by ~0.2. Thirty times too small, because it was mostly cancelling.
-  //
-  // Fix: measure each iris as an offset from ITS OWN EYE'S CENTRE, in image coordinates. Same
-  // sign for both eyes, always.
+  // MediaPipe gives every landmark a z. So build each eye's own 3D frame — its x-axis along the
+  // eye corners, its y-axis from the face's own vertical (forehead→chin, rigid points) — and
+  // measure the iris offset along THOSE axes. The frame rotates with the head, so a head turn
+  // cancels out geometrically instead of having to be learned statistically.
+  const P = (i) => lm[i];
+  const sub = (a, c) => ({ x: a.x - c.x, y: a.y - c.y, z: a.z - c.z });
+  const dot3 = (a, c) => a.x * c.x + a.y * c.y + a.z * c.z;
+  const len3 = (a) => Math.hypot(a.x, a.y, a.z);
+  const scale3 = (a, k) => ({ x: a.x * k, y: a.y * k, z: a.z * k });
+  const norm3 = (a) => scale3(a, 1 / (len3(a) || 1e-9));
+
   const irisCentre = (a, z) => {
-    let x = 0, y = 0;
-    for (let i = a; i <= z; i++) { x += lm[i].x; y += lm[i].y; }
-    return { x: x / (z - a + 1), y: y / (z - a + 1) };   // the ring, not one point: 5x less jitter
+    let x = 0, y = 0, zz = 0;
+    for (let i = a; i <= z; i++) { x += lm[i].x; y += lm[i].y; zz += lm[i].z; }
+    const n = z - a + 1;
+    return { x: x / n, y: y / n, z: zz / n };   // the 5-point ring, not one point: ~5x less jitter
   };
 
-  const eye = (irisA, irisZ, c1, c2, top, bot) => {
-    const ir = irisCentre(irisA, irisZ);
-    const cx = (lm[c1].x + lm[c2].x) / 2;
-    const cy = (lm[c1].y + lm[c2].y) / 2;
-    const w = Math.hypot(lm[c2].x - lm[c1].x, lm[c2].y - lm[c1].y) || 1e-6;
+  // The face's own vertical: forehead (10) to chin (152). Rigid bone landmarks — they do not
+  // move when he blinks, talks, or squints, and they rotate with the head.
+  const faceDown = norm3(sub(P(152), P(10)));
 
-    // Vertical is normalised by eye WIDTH, not eye height. The lid-to-lid distance is tiny and
-    // it moves every time he blinks or squints — dividing by it produced a vertical signal with
-    // a noise reading of 1.7 (i.e. pure garbage). Eye width is rigid and stable.
-    return { x: (ir.x - cx) / w, y: (ir.y - cy) / w };
+  const eye = (irisA, irisZ, c1, c2) => {
+    const a = P(c1), c = P(c2);
+    const ex = norm3(sub(c, a));                                   // along the eye, in 3D
+    const ey = norm3(sub(faceDown, scale3(ex, dot3(faceDown, ex)))); // face-vertical ⊥ ex
+    const w = len3(sub(c, a)) || 1e-6;
+    const mid = { x: (a.x + c.x) / 2, y: (a.y + c.y) / 2, z: (a.z + c.z) / 2 };
+    const d = sub(irisCentre(irisA, irisZ), mid);
+    return { x: dot3(d, ex) / w, y: dot3(d, ey) / w };
   };
 
-  const L = eye(468, 472, L_OUT, L_IN, L_TOP, L_BOT);
-  const R = eye(473, 477, R_IN, R_OUT, R_TOP, R_BOT);
-
+  // Corner order chosen so both eyes' x-axes point the same way across the face — the 2D version
+  // got this wrong once and the two eyes cancelled each other to zero.
+  const L = eye(468, 472, L_OUT, L_IN);
+  const R = eye(473, 477, R_IN, R_OUT);
   const ix = (L.x + R.x) / 2;
   const iy = (L.y + R.y) / 2;
 
-  // Lid opening, normalised by eye width. Looking DOWN closes the lid; looking UP opens it. It is
-  // one of the strongest vertical-gaze cues on a webcam — and without it the model cannot separate
-  // a downward eye from a drooping lid, which is exactly what wrecked the bottom of the screen.
-  const aperture = (top, bot, c1, c2) => {
-    const h = Math.hypot(lm[bot].x - lm[top].x, lm[bot].y - lm[top].y);
-    const w = Math.hypot(lm[c2].x - lm[c1].x, lm[c2].y - lm[c1].y) || 1e-6;
-    return h / w;
-  };
-  const ap = (aperture(L_TOP, L_BOT, L_OUT, L_IN) + aperture(R_TOP, R_BOT, R_IN, R_OUT)) / 2;
+  // Lid opening in 3D, normalised by eye width. Looking down closes the lid; without this the
+  // model cannot separate a lowered eye from a lowered eyelid.
+  const apOf = (top, bot, c1, c2) =>
+    len3(sub(P(bot), P(top))) / (len3(sub(P(c2), P(c1))) || 1e-6);
+  const ap = (apOf(L_TOP, L_BOT, L_OUT, L_IN) + apOf(R_TOP, R_BOT, R_IN, R_OUT)) / 2;
 
   // Head yaw/pitch out of the 4x4 rigid transform (column-major).
   let yaw = 0, pitch = 0;
@@ -114,87 +119,20 @@ function features(lm, face, matrix) {
     pitch = Math.atan2(m[9], m[10]);
   }
 
+  // WHERE THE HEAD IS, not just where it points. Sliding sideways in the chair changes the
+  // camera's viewing angle onto the eye without changing yaw at all — translation needs its own
+  // features or it becomes an unexplained offset. Nose tip for position, inter-ocular distance
+  // for range.
+  const nose = P(1);
+  const nx = nose.x - 0.5, ny = nose.y - 0.5;
+  const sc = Math.log(len3(sub(P(L_OUT), P(R_OUT))) || 1e-6);
+
   const lid = Math.max(b.eyeBlinkLeft ?? 0, b.eyeBlinkRight ?? 0);
   const bothShut = (b.eyeBlinkLeft ?? 0) > BLINK_ON && (b.eyeBlinkRight ?? 0) > BLINK_ON;
 
-  // No cross-terms. They multiply two noisy numbers together and hand the result to a model that
-  // has to tell an 8th of a screen apart. Iris and head pose, and nothing else.
-  return { v: [ix, iy, yaw, pitch, ap], lid, bothShut };
+  return { v: [ix, iy, yaw, pitch, ap, nx, ny, sc], lid, bothShut };
 }
 
-/**
- * THE MODEL. Third attempt, and this time the error it reports is a real one.
- *
- * Attempt 1 — least squares on 7 collinear features, no standardisation. Produced weights of
- * TWENTY THOUSAND pixels per unit. A 0.3% iris wobble became 60px of jitter. An amplifier.
- *
- * Attempt 2 — inverse-distance interpolation between 9 calibration centroids. Bounded, so it
- * stopped flying off screen. But it reported a 5-pixel calibration error, which was a LIE: the
- * weight at zero distance is enormous, so each point trivially reproduced ITSELF. It was
- * grading its own homework with the answers in front of it. And because every feature was
- * standardised to equal weight, HEAD POSE counted as much as iris position — so "where is he
- * looking" was decided partly by how he was holding his head.
- *
- * Attempt 3 — what actually works, and what real webcam trackers do:
- *
- *   - IRIS ONLY drives the mapping. He sits at a laptop; his head is roughly fixed. Letting head
- *     pose into the model just lets a shrug hijack the estimate.
- *   - A quadratic surface (1, x, y, x², y², xy). Gaze-to-screen is mildly curved; a plane can't
- *     fit the corners.
- *   - Features STANDARDISED before solving, and a ridge scaled to the data. This is exactly what
- *     was missing in attempt 1 — it is why the weights exploded.
- *   - The reported error is LEAVE-ONE-OUT: fit on 8 points, predict the 9th, and measure that.
- *     A model cannot cheat on a point it has never seen. THIS is the number that tells the truth.
- */
-
-const poly = (ix, iy) => [1, ix, iy, ix * ix, iy * iy, ix * iy];
-
-function ridgeSolve(X, t, lambda) {
-  const n = X[0].length;
-  const A = Array.from({ length: n }, () => new Float64Array(n));
-  const b = new Float64Array(n);
-  for (let r = 0; r < X.length; r++) {
-    for (let i = 0; i < n; i++) {
-      b[i] += X[r][i] * t[r];
-      for (let j = 0; j < n; j++) A[i][j] += X[r][i] * X[r][j];
-    }
-  }
-  for (let i = 1; i < n; i++) A[i][i] += lambda;   // never penalise the intercept
-
-  for (let c = 0; c < n; c++) {
-    let p = c;
-    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
-    [A[c], A[p]] = [A[p], A[c]];
-    [b[c], b[p]] = [b[p], b[c]];
-    if (Math.abs(A[c][c]) < 1e-12) continue;
-    for (let r = c + 1; r < n; r++) {
-      const f = A[r][c] / A[c][c];
-      for (let k = c; k < n; k++) A[r][k] -= f * A[c][k];
-      b[r] -= f * b[c];
-    }
-  }
-  const w = new Float64Array(n);
-  for (let i = n - 1; i >= 0; i--) {
-    let s = b[i];
-    for (let j = i + 1; j < n; j++) s -= A[i][j] * w[j];
-    w[i] = Math.abs(A[i][i]) < 1e-12 ? 0 : s / A[i][i];
-  }
-  return w;
-}
-
-const dotv = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
-
-/**
- * I dropped head pose on a hunch and the error got WORSE. So stop hunching.
- *
- * When a man looks at the far corner of a laptop screen he TURNS HIS HEAD. His eyes do only part
- * of the work — which means the iris alone cannot tell you where he is looking, because the same
- * iris position means different things depending on where the head is pointing. That is why an
- * iris-only fit could not predict a held-out corner.
- *
- * So fit BOTH candidates and let leave-one-out cross-validation pick the winner. The data decides
- * which features matter, not me. I have now guessed wrong three times; the guessing stops here.
- */
 /**
  * THE MODEL, now that we have real data.
  *
@@ -287,14 +225,14 @@ function fitAxis(train, test, targetKey, variants) {
 // having moved between calibrating and using it.
 const X_VARIANTS = {
   iris: (p) => [p.ix, p.iy],
-  'iris+yaw': (p) => [p.ix, p.iy, p.yaw],
   'iris+head': (p) => [p.ix, p.iy, p.yaw, p.pitch],
+  'iris+head+pos': (p) => [p.ix, p.iy, p.yaw, p.nx, p.sc],
 };
 const Y_VARIANTS = {
   iris: (p) => [p.iy, p.ix],
   'iris+lid': (p) => [p.iy, p.ix, p.ap],
-  'iris+head': (p) => [p.iy, p.ix, p.pitch, p.yaw],
-  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch, p.yaw],
+  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch],
+  'iris+lid+head+pos': (p) => [p.iy, p.ix, p.ap, p.pitch, p.ny, p.sc],
 };
 
 function buildModel(train, test) {
@@ -498,7 +436,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    const [px0, py0] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3], ap: f.v[4] });
+    const [px0, py0] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3], ap: f.v[4], nx: f.v[5], ny: f.v[6], sc: f.v[7] });
     const rx = Math.max(0, Math.min(window.innerWidth, px0 + bias.x));
     const ry = Math.max(0, Math.min(window.innerHeight, py0 + bias.y));
 
@@ -627,6 +565,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
             if (lastLid > BLINK_ON) continue;            // he blinked; that frame is worthless
             collected[pass].push({
               ix: lastRaw[0], iy: lastRaw[1], yaw: lastRaw[2], pitch: lastRaw[3], ap: lastRaw[4],
+              nx: lastRaw[5], ny: lastRaw[6], sc: lastRaw[7],
               x: px * window.innerWidth, y: py * window.innerHeight,
             });
           }
@@ -689,7 +628,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         await new Promise((r) => setTimeout(r, 40));
         if (!lastRaw || lastLid > BLINK_ON) continue;
         got.push(model.predict({ ix: lastRaw[0], iy: lastRaw[1], yaw: lastRaw[2],
-          pitch: lastRaw[3], ap: lastRaw[4] }));
+          pitch: lastRaw[3], ap: lastRaw[4], nx: lastRaw[5], ny: lastRaw[6], sc: lastRaw[7] }));
       }
       if (got.length < 20) return false;
       const mid = (k) => got.map((g) => g[k]).sort((a, b) => a - b)[Math.floor(got.length / 2)];
