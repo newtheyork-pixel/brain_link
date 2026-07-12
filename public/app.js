@@ -12,6 +12,7 @@
 // with a keyboard, before a single electrode ships.
 
 import { createMic } from '/mic.js';
+import { createGaze } from '/gaze.js';
 
 const $ = (s) => document.querySelector(s);
 const GRID = 8; // 8 tiles + undo = 9 zones. Hard cap: EOG selection degrades past 9.
@@ -27,6 +28,7 @@ const state = {
   listening: false,
   mode: 'answer',   // answer | ask | tell — the only way he gets to start a conversation
   coreSlots: 2,   // how many tiles never move. Motor learning vs prediction — a measured knob.
+  dwellMs: 900,   // how long he must hold a tile with his eyes before it counts
   pinned: 0,      // how many the server actually pinned this turn
   startedAt: null,
   selections: 0,
@@ -321,6 +323,116 @@ function stopListening() {
   $('#level').style.width = '0%';
 }
 
+/* ---------- eyes ---------- */
+//
+// The camera moves the SAME cursor the arrow keys move, and a dwell emits the SAME SELECT.
+// That is the whole point of the event bus: the eye tier plugs in and nothing else changes.
+//
+// Dwell rather than blink-only, because a webcam sees an involuntary blink and a deliberate one
+// identically, and a device that fires on a reflex would put words in his mouth. Blink is offered
+// as a SECOND way to confirm, never the only one.
+
+let gaze = null;
+let dwellTile = -1, dwellStart = 0, dwellRaf = 0;
+
+function tileAt(x, y) {
+  const tiles = [...document.querySelectorAll('.tile')];
+  for (let i = 0; i < tiles.length; i++) {
+    const r = tiles[i].getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return i;
+  }
+  return -1;
+}
+
+function resetDwell() {
+  dwellTile = -1;
+  dwellStart = 0;
+  document.querySelectorAll('.tile').forEach((t) => t.style.setProperty('--dwell', '0'));
+}
+
+function onGazePoint(x, y) {
+  const dot = $('#gaze-dot');
+  dot.hidden = false;
+  dot.style.transform = `translate(${x}px, ${y}px)`;
+
+  // The confirm sheet and the calibration overlay own the screen when they are up.
+  if (!$('#confirm').hidden || !$('#calib').hidden) return resetDwell();
+
+  const i = tileAt(x, y);
+  if (i < 0) return resetDwell();
+
+  if (i !== dwellTile) {
+    resetDwell();
+    dwellTile = i;
+    dwellStart = performance.now();
+    state.cursor = i;
+    renderGrid();
+    return;
+  }
+
+  const held = performance.now() - dwellStart;
+  const frac = Math.min(1, held / state.dwellMs);
+  document.querySelectorAll('.tile')[i]?.style.setProperty('--dwell', String(frac));
+
+  if (frac >= 1) {
+    const tile = state.tiles[i];
+    resetDwell();
+    dwellStart = performance.now() + 600;   // brief refractory: don't instantly re-fire
+    bus.emit('SELECT');
+    if (!tile) return;
+  }
+}
+
+async function startGaze() {
+  if (gaze?.running) return;
+
+  gaze = createGaze({
+    onGaze: onGazePoint,
+    // A blink is a SECOND way to confirm what he is already looking at — never a first.
+    onBlink: () => {
+      if (dwellTile >= 0 && $('#confirm').hidden && $('#calib').hidden) {
+        resetDwell();
+        bus.emit('SELECT');
+      }
+    },
+    onFace: (found) => {
+      $('#gaze-dot').classList.toggle('lost', !found);
+      if (!found) resetDwell();
+    },
+    onError: (msg) => { toast(msg); stopGaze(); },
+    onCalibrationProgress: (p) => {
+      if (p.state === 'done') {
+        $('#calib').hidden = true;
+        $('#gaze-state').textContent = `Calibrated (±${p.errorPx}px).`;
+        // A fit that can't even reproduce its own calibration points will never hit a tile.
+        if (p.errorPx > 180) toast('Calibration is rough — sit still, good light, and try again.');
+        return;
+      }
+      $('#calib').hidden = false;
+      const d = $('#calib-dot');
+      d.style.left = `${p.x * 100}%`;
+      d.style.top = `${p.y * 100}%`;
+      d.classList.toggle('sampling', p.state === 'sampling');
+      $('#calib-msg').textContent = p.state === 'sampling' ? 'Hold it…' : 'Look at the dot';
+      $('#calib-count').textContent = `${p.index + 1} of ${p.total}`;
+    },
+  });
+
+  const ok = await gaze.start();
+  if (!ok) return;
+  $('#gaze-row').hidden = false;
+  $('#gaze-state').textContent = 'Camera on — not calibrated yet.';
+  toast('Camera on. Calibrate before using your eyes to select.');
+}
+
+function stopGaze() {
+  gaze?.stop();
+  gaze = null;
+  resetDwell();
+  $('#gaze-dot').hidden = true;
+  $('#gaze-row').hidden = true;
+}
+
 /* ---------- feedback ---------- */
 
 let toastTimer = null;
@@ -351,9 +463,10 @@ function renderGrid() {
     const b = document.createElement('button');
     // Pinned tiles get a quiet marker: they are in the same place every single time,
     // which is what lets him stop reading the grid and start knowing it.
+    const aiming = state.driver === 'scan' || state.driver === 'gaze';
     const pinned = !state.urgent && i < state.pinned;
     b.className = 'tile'
-      + (state.driver === 'scan' && i === state.cursor ? ' cursor' : '')
+      + (aiming && i === state.cursor ? ' cursor' : '')
       + (pinned ? ' pinned' : '')
       + (state.urgent ? ' urgent-tile' : '');
     b.textContent = t;
@@ -390,7 +503,13 @@ $('#predictive').onchange = (e) => { state.predictive = e.target.checked; loadTi
 $('#driver').onchange = (e) => {
   state.driver = e.target.value;
   $('#scan-help').hidden = state.driver !== 'scan';
+  if (state.driver === 'gaze') startGaze(); else stopGaze();
   renderGrid();
+};
+$('#calibrate').onclick = () => gaze?.calibrate();
+$('#dwell').oninput = (e) => {
+  state.dwellMs = +e.target.value;
+  $('#dwell-label').textContent = `Hold a tile for ${(state.dwellMs / 1000).toFixed(1)}s to pick it.`;
 };
 $('#compose').onclick = compose;
 $('#undo').onclick = undo;

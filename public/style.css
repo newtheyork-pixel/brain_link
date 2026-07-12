@@ -155,3 +155,40 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
   border-radius: 99px; transition: width .08s linear; }
 /* words still being spoken — not final yet */
 .partner input.interim { color: var(--muted); font-style: italic; }
+
+/* ---------- eyes ---------- */
+
+/* Where he is looking. Big and soft on purpose: webcam gaze is accurate to a few degrees, and
+   a sharp 2px dot would advertise a precision we do not have. */
+.gaze-dot { position: fixed; left: 0; top: 0; width: 26px; height: 26px; margin: -13px 0 0 -13px;
+  border-radius: 50%; background: rgba(91,141,239,.35); border: 2px solid var(--accent);
+  pointer-events: none; z-index: 25; transition: transform .04s linear; }
+.gaze-dot[hidden] { display: none; }
+.gaze-dot.lost { background: rgba(217,90,74,.25); border-color: var(--danger); }
+
+/* The dwell ring: he can SEE the tile filling up, so a selection is never a surprise and he
+   always has time to look away. --dwell is 0..1, set per frame from the gaze loop. */
+.tile::before { content: ""; position: absolute; inset: 0; border-radius: 14px;
+  background: linear-gradient(to top, rgba(91,141,239,.28) 0%,
+              rgba(91,141,239,.28) calc(var(--dwell, 0) * 100%),
+              transparent calc(var(--dwell, 0) * 100%));
+  pointer-events: none; }
+
+.calib { position: fixed; inset: 0; background: #0B0E13; z-index: 50;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+.calib[hidden] { display: none; }
+.calib-dot { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+  border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(91,141,239,.5); transition: left .35s ease, top .35s ease; }
+.calib-dot.sampling { animation: cal-pulse .8s ease-in-out infinite; background: var(--gold); }
+@keyframes cal-pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(224,179,84,.5); }
+  50%     { box-shadow: 0 0 0 16px rgba(224,179,84,0); }
+}
+.calib-msg { color: var(--ink); font-size: 22px; font-weight: 650; margin: 0; }
+.calib-count { color: var(--muted); font-size: 14px; margin: 0;
+  font-variant-numeric: tabular-nums; }
+.settings input[type=range] { width: 110px; accent-color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .calib-dot, .calib-dot.sampling, .gaze-dot { animation: none; transition: none; }
+}

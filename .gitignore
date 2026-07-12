@@ -10,3 +10,5 @@ asr/*.dylib
 asr/*.bin
 .gstack/
 .env
+public/vendor/*.wasm
+public/vendor/*.task

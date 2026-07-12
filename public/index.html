@@ -74,8 +74,17 @@
     <span><b>Input</b><em>How he selects.</em></span>
     <select id="driver">
       <option value="touch">Touch</option>
-      <option value="scan">Scanning (eye / switch)</option>
+      <option value="gaze">Eyes (camera)</option>
+      <option value="scan">Scanning (switch)</option>
     </select>
+  </label>
+  <div class="row" id="gaze-row" hidden>
+    <span><b>Eye tracking</b><em id="gaze-state">Not calibrated.</em></span>
+    <button id="calibrate" class="ghost">Calibrate</button>
+  </div>
+  <label class="row">
+    <span><b>Dwell</b><em id="dwell-label">Hold a tile for 0.9s to pick it.</em></span>
+    <input type="range" id="dwell" min="400" max="2500" step="100" value="900">
   </label>
   <p class="who"><span id="who-name">—</span> · <span id="voice-state">placeholder voice</span></p>
   <p class="hud"><b id="m-sel">0</b> selections · <b id="m-time">0.0</b>s · <span id="m-src"></span></p>
@@ -89,6 +98,17 @@
 <!-- Failures used to be silent: the mic was blocked, the audio was blocked, and the app
      just sat there. Never fail quietly at a bedside. -->
 <div id="toast" class="toast" hidden role="status"></div>
+
+<!-- Where he is looking. Coarse on purpose: webcam gaze is good to a few degrees, not a few
+     pixels, so we never ask it to hit a small target. Eight big tiles, and a dwell to confirm. -->
+<div id="gaze-dot" class="gaze-dot" hidden></div>
+
+<!-- Calibration. Look at each dot; we learn how THIS person's eyes map to THIS screen. -->
+<div id="calib" class="calib" hidden>
+  <div id="calib-dot" class="calib-dot"></div>
+  <p id="calib-msg" class="calib-msg">Look at the dot</p>
+  <p id="calib-count" class="calib-count"></p>
+</div>
 
 <div id="scan-help" class="scan-help" hidden>
   Arrow keys move &middot; Space selects &middot; Backspace undoes

@@ -17,8 +17,16 @@ const SESSIONS = path.join(ROOT, 'data', 'sessions.jsonl');
 const profile = JSON.parse(await readFile(path.join(ROOT, 'data', 'profile.json'), 'utf8'));
 const OPENERS = profile.openers;
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
-  '.json': 'application/json', '.wav': 'audio/wav', '.svg': 'image/svg+xml' };
+// .mjs and .wasm matter: a module served as text/plain is REFUSED by the browser, and the whole
+// import chain dies with "failed to fetch dynamically imported module" — which points at the
+// importer, not the file that actually has the wrong type.
+const MIME = {
+  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
+  '.css': 'text/css', '.json': 'application/json', '.wav': 'audio/wav',
+  '.svg': 'image/svg+xml', '.wasm': 'application/wasm',
+  '.task': 'application/octet-stream', '.bin': 'application/octet-stream',
+  '.data': 'application/octet-stream',
+};
 
 const json = (res, code, body) => {
   res.writeHead(code, { 'content-type': 'application/json' });

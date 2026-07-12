@@ -1,0 +1,15 @@
+#!/bin/bash
+# MediaPipe FaceLandmarker, vendored. Nothing is fetched at runtime — the eye tracker runs
+# entirely on this machine, like everything else in this app.
+set -e
+cd "$(dirname "$0")"
+V=0.10.18
+B="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@$V"
+curl -fL -o vision_bundle.mjs "$B/vision_bundle.mjs"
+for f in vision_wasm_internal.js vision_wasm_internal.wasm \
+         vision_wasm_nosimd_internal.js vision_wasm_nosimd_internal.wasm; do
+  curl -fL -o "$f" "$B/wasm/$f"
+done
+curl -fL -o face_landmarker.task \
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+echo "done — eye tracking assets are local."
