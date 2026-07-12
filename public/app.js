@@ -22,6 +22,7 @@ const state = {
   literal: false,
   predictive: true,
   urgent: false,
+  listening: false,
   coreSlots: 2,   // how many tiles never move. Motor learning vs prediction — a measured knob.
   startedAt: null,
   selections: 0,
@@ -64,12 +65,31 @@ bus.on((event) => {
 async function pick(tile) {
   if (!tile) return;
   if (!state.startedAt) state.startedAt = performance.now();
+
+  // "yes" needs no sentence built around it. Making him pick it, press Build, and choose
+  // between three phrasings of the word "yes" costs three selections and a minute of
+  // someone else's patience to say one syllable. Speak it now.
+  const now = INSTANT[String(tile).toLowerCase().trim()];
+  if (now && !state.selected.length) {
+    state.selections++;
+    await say(now, { instant: true });
+    return;
+  }
+
   state.selected.push(tile);
   state.selections++;
   renderSelected();
+  renderComposing();  // the other person can now see he is mid-sentence
   renderHUD();
   await loadTiles(); // predictive narrowing: the next word he needs is now on screen
 }
+
+// Kept in sync with lib/llm.mjs INSTANT.
+const INSTANT = {
+  'yes': 'Yes.', 'no': 'No.', 'thank you': 'Thank you.', 'i love you': 'I love you.',
+  'help me': 'Help me.', 'stop': 'Stop.', 'pain': 'I am in pain.',
+  "can't breathe": "I can't breathe.", 'wait': "Wait — I am saying something.",
+};
 
 function undo() {
   if (!state.selected.length) return;
@@ -144,16 +164,22 @@ function showConfirm(candidates) {
 
 const closeConfirm = () => { $('#confirm').hidden = true; $('#compose').focus(); };
 
-async function say(text) {
+async function say(text, { instant = false } = {}) {
   closeConfirm();
   const elapsed = (performance.now() - state.startedAt) / 1000;
   const words = text.trim().split(/\s+/).length;
+
+  // Stop listening while he speaks, or the mic hears his own voice and treats it as the
+  // other person talking — the app would start answering itself.
+  const wasListening = state.listening;
+  if (wasListening) stopListening();
 
   const res = await fetch('/api/speak', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ text, voice: state.profile.voiceModel ? 'cloned' : 'placeholder' }),
   });
   const audio = new Audio(URL.createObjectURL(await res.blob()));
+  audio.onended = () => { if (wasListening) startListening(); };
   audio.play();
 
   // The two numbers the research is about.
@@ -168,6 +194,7 @@ async function say(text) {
       predictive: state.predictive,
       literal: state.literal,
       driver: state.driver,
+      instant,
     }),
   });
 
@@ -179,8 +206,56 @@ function reset() {
   state.selections = 0;
   state.startedAt = null;
   renderSelected();
+  renderComposing();
   renderHUD();
   loadTiles();
+}
+
+/* ---------- listening ---------- */
+//
+// DEV ONLY: the browser's SpeechRecognition. In Chrome this sends audio to Google, which
+// breaks the offline promise — so it is labelled on screen, not hidden.
+// SHIP: iOS Speech framework with requiresOnDeviceRecognition = true. Genuinely on-device,
+// free, no network. Same seam: transcript in, tiles out.
+
+const SR = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+let recog = null;
+
+function startListening() {
+  if (!SR || state.listening) return;
+  recog = new SR();
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.lang = 'en-US';
+
+  recog.onresult = (e) => {
+    let final = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) final += e.results[i][0].transcript;
+    }
+    const partial = e.results[e.results.length - 1][0].transcript;
+    $('#partner-said').value = (final || partial).trim();
+    // Only re-predict on a completed sentence — not on every syllable, or the grid
+    // thrashes under his finger while he is trying to aim at it.
+    if (final && !state.selected.length) loadTiles();
+  };
+  recog.onerror = (e) => { if (e.error !== 'no-speech') stopListening(); };
+  recog.onend = () => { if (state.listening) recog.start(); }; // Chrome times out; keep it alive
+
+  recog.start();
+  state.listening = true;
+  $('#listen').classList.add('on');
+  $('#listen').textContent = 'Listening…';
+  $('#listen').setAttribute('aria-pressed', 'true');
+}
+
+function stopListening() {
+  state.listening = false;
+  try { recog?.stop(); } catch {}
+  recog = null;
+  $('#listen').classList.remove('on');
+  $('#listen').textContent = 'Listen';
+  $('#listen').setAttribute('aria-pressed', 'false');
 }
 
 /* ---------- render ---------- */
@@ -217,6 +292,14 @@ function renderSelected() {
   $('#undo').disabled = !state.selected.length;
 }
 
+// What the OTHER person sees. Without it they are watching a man stare at a screen and
+// they have no idea he is halfway through a sentence — so they talk over him, or leave.
+function renderComposing() {
+  const on = state.selected.length > 0;
+  $('#composing').hidden = !on;
+  $('#composing-words').textContent = state.selected.join(' ');
+}
+
 function renderHUD() {
   $('#m-sel').textContent = state.selections;
   const s = state.startedAt ? (performance.now() - state.startedAt) / 1000 : 0;
@@ -237,6 +320,13 @@ $('#compose').onclick = compose;
 $('#undo').onclick = undo;
 $('#urgent').onclick = toggleUrgent;
 $('#cancel').onclick = closeConfirm;
+$('#listen').onclick = () => (state.listening ? stopListening() : startListening());
+// He cannot raise a hand or clear his throat. Without this he can never ENTER a
+// conversation — only ever answer one someone else started.
+$('#hold').onclick = () => {
+  if (!state.startedAt) state.startedAt = performance.now();
+  say("Wait — I'm saying something.", { instant: true });
+};
 // Escape, or clicking the backdrop, always gets him out. Never trap him in a dialog.
 $('#confirm').onclick = (e) => { if (e.target.id === 'confirm') closeConfirm(); };
 window.addEventListener('keydown', (e) => {

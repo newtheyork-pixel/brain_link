@@ -31,7 +31,20 @@
 
 <section class="partner">
   <label for="partner-said">They said to you</label>
-  <input id="partner-said" type="text" placeholder="e.g. Do you want anything?" autocomplete="off">
+  <div class="hear-row">
+    <input id="partner-said" type="text" placeholder="Tap Listen — or type it" autocomplete="off">
+    <!-- Nobody transcribes their own sentence into a box. The room is listened to. -->
+    <button id="listen" class="listen" aria-pressed="false">Listen</button>
+  </div>
+</section>
+
+<!-- THE PARTNER'S VIEW. He needs ~40 seconds per word; the other person is standing there
+     in silence with no idea anything is happening, so they fill it, or they leave. This
+     strip is what makes them wait. -->
+<section id="composing" class="composing" hidden aria-live="polite">
+  <span class="pulse"></span>
+  <span class="composing-label">Ray is saying…</span>
+  <strong id="composing-words"></strong>
 </section>
 
 <section class="utterance" aria-live="polite">
@@ -42,6 +55,9 @@
 <main id="grid" class="grid" role="group" aria-label="Word tiles"></main>
 
 <section class="actions">
+  <!-- He cannot raise a hand or clear his throat. Without this he cannot get into a
+       conversation at all — he can only ever answer one. -->
+  <button id="hold" class="hold">Wait — I'm talking</button>
   <button id="compose" class="primary" disabled>Build sentence</button>
   <!-- Always reachable. If the grid is about Emma's graduation and he can't breathe,
        a predicted grid would trap him. No amount of tile quality fixes that. -->

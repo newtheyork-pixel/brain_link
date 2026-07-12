@@ -28,9 +28,33 @@ select { background: var(--surface); color: var(--ink); border: 1px solid var(--
 
 .partner label { display: block; font-size: 11px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--muted); font-weight: 700; margin-bottom: 5px; }
-.partner input { width: 100%; background: var(--surface); border: 1px solid var(--line);
+.hear-row { display: flex; gap: 10px; }
+.partner input { flex: 1; background: var(--surface); border: 1px solid var(--line);
   border-radius: 10px; padding: 12px 14px; color: var(--ink); font-size: 17px; }
 .partner input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.listen { background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 22px; font-size: 15px; font-weight: 650; cursor: pointer;
+  white-space: nowrap; }
+button.listen.on { border-color: var(--accent); color: var(--accent);
+  background: rgba(91,141,239,.10); }
+button.listen.on::before { content: ""; display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--accent); margin-right: 8px;
+  animation: pulse 1.4s ease-in-out infinite; }
+
+/* The partner's window into a mind that is working. This is read from across a room by
+   someone who is deciding, right now, whether to keep waiting. Make it unmissable. */
+.composing { display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+  background: rgba(224,179,84,.10); border: 1px solid rgba(224,179,84,.35);
+  border-radius: 12px; }
+.composing .pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--gold);
+  animation: pulse 1.2s ease-in-out infinite; flex: none; }
+.composing-label { color: var(--gold); font-size: 14px; font-weight: 700;
+  letter-spacing: .04em; white-space: nowrap; }
+.composing strong { font-size: 24px; color: var(--ink); font-weight: 650; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) {
+  .composing .pulse, button.listen.on::before { animation: none; }
+}
 
 .utterance { display: flex; align-items: center; gap: 12px; min-height: 62px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
@@ -69,6 +93,10 @@ button.urgent { background: transparent; color: var(--danger); border: 2px solid
   border-radius: 12px; padding: 18px 28px; font-size: 18px; font-weight: 700; cursor: pointer; }
 button.urgent:hover { background: rgba(217,90,74,.12); }
 body.in-urgent button.urgent { background: var(--danger); color: #12151A; }
+button.hold { background: transparent; color: var(--gold); border: 2px solid rgba(224,179,84,.5);
+  border-radius: 12px; padding: 18px 24px; font-size: 17px; font-weight: 700; cursor: pointer;
+  white-space: nowrap; }
+button.hold:hover { background: rgba(224,179,84,.12); border-color: var(--gold); }
 button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 16px; font-size: 15px; cursor: pointer; }
 button.ghost:disabled { opacity: .35; cursor: default; }
