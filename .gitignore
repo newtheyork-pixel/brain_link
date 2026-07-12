@@ -9,3 +9,4 @@ asr/whisper-cli
 asr/*.dylib
 asr/*.bin
 .gstack/
+.env

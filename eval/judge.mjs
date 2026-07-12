@@ -13,7 +13,7 @@
 // app at the 4B on localhost to measure it, the judge would follow and try to grade with a
 // 14B that isn't there. The judge should always be the strongest model available, and it
 // must never be the same model it is grading.
-const HOST = process.env.STILLME_JUDGE_HOST ?? 'https://llm.thegriffinfund.org';
+const HOST = process.env.STILLME_JUDGE_HOST ?? process.env.STILLME_REMOTE_HOST ?? 'http://localhost:11434';
 const MODEL = process.env.STILLME_JUDGE_MODEL ?? 'qwen3:14b';
 
 const RUBRIC = {
