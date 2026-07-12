@@ -74,10 +74,12 @@ the exact indignity these users are fighting.
 - **The model proposes; it never speaks.** Three candidates. He always picks.
 - **Literal mode** — *say exactly my words, add nothing.* Always one tap away.
 - **Every grid contains a way to say no.**
-- **Urgent** is one selection from any screen. A predicted grid about a graduation must never
-  trap a man who cannot breathe.
-- **`false_completion_rate`** — how often he accepts a sentence that wasn't what he meant.
-  Nobody in the LLM-AAC literature reports this. We will.
+- **Urgent** is one selection from any screen, and it interrupts — a predicted grid about a
+  graduation must never trap a man who cannot breathe.
+
+**Planned, not yet built:** **`false_completion_rate`** — how often he accepts a sentence that
+wasn't what he meant. Nobody in the LLM-AAC literature reports it; we intend to measure it. It is
+*not* enforced in code today.
 
 ## The research contribution
 

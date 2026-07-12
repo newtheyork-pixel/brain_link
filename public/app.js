@@ -791,7 +791,18 @@ function beep(hz = 880, len = 0.12) {
  */
 async function testGazeAccuracy() {
   if (!gaze?.calibrated) return toast('Calibrate first.');
+  try {
+    await runGazeAccuracy();
+  } catch (e) {
+    toast(`Test failed: ${e.message}`);
+  } finally {
+    // No throw may strand him on the black overlay. Always tear it down.
+    endCalibrationUI();
+    $$('.tile').forEach((t) => t.classList.remove('target'));
+  }
+}
 
+async function runGazeAccuracy() {
   // The settings drawer sits over the right-hand tiles. Testing with it open asked him to look at
   // words he could not see — which is exactly what happened, and it made the numbers meaningless.
   clearScreen();
