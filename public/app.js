@@ -435,6 +435,7 @@ function stopListening() {
 
 let gaze = null;
 let dwellTile = -1, dwellStart = 0;
+let calibPhase2 = false;
 
 // TILE HYSTERESIS.
 //
@@ -538,7 +539,11 @@ async function startGaze() {
         // not his eyes — and that is a fact about him, not a bug to hide.
         $('#calib-bar').hidden = true;
         $('#gaze-state').textContent =
-          `X ±${p.errX}px / Y ±${p.errY}px · tile ${p.tile.w}x${p.tile.h} · ${p.samples} samples · ${p.variant} · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+          `X ±${p.errX}px / Y ±${p.errY}px · tile ${p.tile.w}x${p.tile.h} · ${p.samples} samples · ${p.variant}`
+          + ` · head ${p.headVaried ? 'varied ✓' : 'TOO STILL'} · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+        // If his head never moved during calibration, the model is blind to head movement and it
+        // WILL fall apart the moment he shifts in his chair. Say so.
+        if (!p.headVaried) toast('Your head barely moved during the second pass — the model cannot correct for head movement. Calibrate again and move your head around.');
         // Save it. He is going to live with this device; he should not have to re-teach it his
         // own eyes every time he opens the app.
         fetch('/api/gazelog', {
@@ -573,7 +578,14 @@ async function startGaze() {
         // The dot MOVES and he follows it. Following a slowly moving target is a reflex, not a
         // skill — which is why this collects hundreds of clean samples where nine dots gave nine.
         d.classList.add('pursuit');
-        $('#calib-msg').textContent = 'Follow the dot with your eyes.';
+        if (p.moveHead && !calibPhase2) {
+          calibPhase2 = true;
+          const m = 'Now follow the dot again — but this time move your head around a little as you go.';
+          say(m, { instant: true, keep: true });
+        }
+        $('#calib-msg').textContent = p.moveHead
+          ? 'Follow the dot — and move your head around as you do.'
+          : 'Follow the dot with your eyes. Head still.';
         $('#calib-msg').style.left = '50%';
         $('#calib-msg').style.top = '92%';
         $('#calib-bar').style.width = `${Math.round(((p.pass + p.progress) / p.total) * 100)}%`;
@@ -947,11 +959,32 @@ $('#calibrate').onclick = async () => {
       }
     : undefined;
 
-  say('Follow the dot with your eyes. Keep your head still.', { instant: true, keep: true });
+  calibPhase2 = false;
+  say('Follow the dot with your eyes. Keep your head still for now.', { instant: true, keep: true });
   await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
 };
 $('#test-gaze').onclick = testGazeAccuracy;
 $('#signal-check').onclick = signalCheck;
+$('#recenter').onclick = async () => {
+  if (!gaze?.calibrated) return toast('Calibrate first.');
+  clearScreen();
+  await new Promise((r) => setTimeout(r, 350));
+  $('#calib').hidden = false;
+  $('#calib-dot').style.display = '';
+  $('#calib-dot').style.left = '50%';
+  $('#calib-dot').style.top = '50%';
+  $('#calib-dot').classList.add('sampling');
+  $('#calib-msg').textContent = 'Look at the dot.';
+  $('#calib-msg').style.left = '50%';
+  $('#calib-msg').style.top = '64%';
+  say('Look at the dot.', { instant: true, keep: true });
+  await new Promise((r) => setTimeout(r, 1100));
+  const r = await gaze.recenter(0.5, 0.5);
+  $('#calib').hidden = true;
+  $('#calib-dot').classList.remove('sampling');
+  toast(r ? `Recentered (${r.dx > 0 ? '+' : ''}${r.dx}, ${r.dy > 0 ? '+' : ''}${r.dy} px).`
+          : 'Could not see your eyes well enough.');
+};
 $('#dwell').oninput = (e) => {
   state.dwellMs = +e.target.value;
   $('#dwell-label').textContent = `Hold a tile for ${(state.dwellMs / 1000).toFixed(1)}s to pick it.`;

@@ -281,14 +281,20 @@ function fitAxis(train, test, targetKey, variants) {
   };
 }
 
+// A person shifts in their chair. They lean. They slump. If the model has only ever seen one head
+// position it has no idea what to do with a different one — and the runtime data showed exactly
+// that: a systematic +0.023 offset in iris-x, ~18% of his whole gaze range, purely from his head
+// having moved between calibrating and using it.
 const X_VARIANTS = {
   iris: (p) => [p.ix, p.iy],
-  'iris+head': (p) => [p.ix, p.iy, p.yaw],
+  'iris+yaw': (p) => [p.ix, p.iy, p.yaw],
+  'iris+head': (p) => [p.ix, p.iy, p.yaw, p.pitch],
 };
 const Y_VARIANTS = {
   iris: (p) => [p.iy, p.ix],
   'iris+lid': (p) => [p.iy, p.ix, p.ap],
-  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch],
+  'iris+head': (p) => [p.iy, p.ix, p.pitch, p.yaw],
+  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch, p.yaw],
 };
 
 function buildModel(train, test) {
@@ -374,7 +380,8 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   let landmarker = null, video = null, stream = null, backend = '?';
   let camera = null, irisPx = 0;
   let running = false;
-  let model = null;                       // { wx, wy } once calibrated
+  let model = null;                       // the eye→screen map, once calibrated
+  let bias = { x: 0, y: 0 };              // constant drift correction, from recenter()
   let median = makeMedian();
   let fixate = makeFixation();
   let lastTs = -1;
@@ -491,7 +498,9 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    const [rx, ry] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3], ap: f.v[4] });
+    const [px0, py0] = model.predict({ ix: f.v[0], iy: f.v[1], yaw: f.v[2], pitch: f.v[3], ap: f.v[4] });
+    const rx = Math.max(0, Math.min(window.innerWidth, px0 + bias.x));
+    const ry = Math.max(0, Math.min(window.innerHeight, py0 + bias.y));
 
     const now = performance.now();
     const [mx, my] = median(rx, ry);
@@ -603,8 +612,8 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       for (let pass = 0; pass < 2; pass++) {
         const pts = path(pass);
         onCalibrationProgress({ state: 'pursuit', pass, total: 2, x: pts[0][0], y: pts[0][1],
-          progress: 0 });
-        await new Promise((r) => setTimeout(r, 1400));   // let him find the dot before it moves
+          progress: 0, moveHead: pass === 1 });
+        await new Promise((r) => setTimeout(r, pass === 1 ? 3000 : 1400));
 
         for (let i = 0; i < pts.length; i++) {
           const [px, py] = pts[i];
@@ -626,6 +635,17 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       }
 
       const [train, test] = collected;
+      const all = [...train, ...test];
+
+      // Did his head actually move? If not, the model has no way to learn the correction, and it
+      // WILL break the moment he shifts in his chair — which is exactly what happened.
+      const spread = (k) => {
+        const v = all.map((p) => p[k]);
+        const m = v.reduce((a, b) => a + b, 0) / v.length;
+        return Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length);
+      };
+      const headSpread = +Math.max(spread('yaw'), spread('pitch')).toFixed(4);
+
       if (train.length < 60 || test.length < 40) {
         onError('Calibration failed — your face was not visible enough. More light, sit closer.');
         return false;
@@ -645,12 +665,37 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         usable, backend, variant: model.variant, looByVariant: model.looByVariant,
         lambda: model.lambda, weightMax: model.weightMax,
         samples: train.length + test.length, nTrain: model.nTrain, nTest: model.nTest,
+        headSpread, headVaried: headSpread > 0.05,
         tile: { w: Math.round(tileW), h: Math.round(tileH) },
       });
       return true;
     },
 
-    recalibrate() { model = null; },
+    recalibrate() { model = null; bias = { x: 0, y: 0 }; },
+
+    /**
+     * RECENTER. He has been sitting here for two hours; he has slumped, or shifted, or someone
+     * moved his chair. The MAP from eye to screen is still right — it is his whole head that has
+     * moved, which shows up as a constant offset. Three seconds looking at one dot fixes that,
+     * where a full recalibration would cost him a minute he does not want to spend.
+     */
+    async recenter(nx, ny) {
+      if (!model) return false;
+      const want = { x: nx * window.innerWidth, y: ny * window.innerHeight };
+      const got = [];
+      const until = performance.now() + 2200;
+      bias = { x: 0, y: 0 };
+      while (performance.now() < until) {
+        await new Promise((r) => setTimeout(r, 40));
+        if (!lastRaw || lastLid > BLINK_ON) continue;
+        got.push(model.predict({ ix: lastRaw[0], iy: lastRaw[1], yaw: lastRaw[2],
+          pitch: lastRaw[3], ap: lastRaw[4] }));
+      }
+      if (got.length < 20) return false;
+      const mid = (k) => got.map((g) => g[k]).sort((a, b) => a - b)[Math.floor(got.length / 2)];
+      bias = { x: want.x - mid(0), y: want.y - mid(1) };
+      return { dx: Math.round(bias.x), dy: Math.round(bias.y) };
+    },
 
     /** The unmapped eye signal itself. The signal check needs this, not the screen point. */
     raw() { return lastRaw; },
