@@ -3,4 +3,9 @@ voices/cache/
 voices/*.onnx
 data/sessions.jsonl
 .DS_Store
+
+# whisper.cpp build output + model (148MB). Rebuild with: ./asr/setup
+asr/whisper-cli
+asr/*.dylib
+asr/*.bin
 .gstack/

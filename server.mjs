@@ -8,6 +8,7 @@ import path from 'node:path';
 import { predictTiles, composeSentence, health } from './lib/llm.mjs';
 import { buildGrid } from './lib/tiles.mjs';
 import { speak } from './lib/voice.mjs';
+import { transcribe, available as asrReady } from './lib/listen.mjs';
 
 const PORT = process.env.PORT ?? 8000;
 const ROOT = process.cwd();
@@ -50,6 +51,7 @@ const routes = {
       running_on: b.where,
       model: b.model,
       offline: b.offline,
+      speech_recognition: (await asrReady()) ? 'whisper.cpp — on this machine' : 'MISSING (run asr/ setup)',
       note: b.offline
         ? 'Fully on-device. Pull the network cable and it keeps working.'
         : 'Remote GPU — best quality, but NOT offline. Switch to on-device before filming.',
@@ -99,6 +101,19 @@ const routes = {
   // he suddenly can't breathe, a predicted grid traps him. No tile quality fixes that.
   'GET /api/urgent': async (req, res) => json(res, 200, { tiles: profile.urgent ?? [] }),
 
+  // The mic, transcribed HERE. The browser sends 16kHz mono WAV; whisper.cpp runs on this
+  // machine and the audio is deleted immediately. Nothing is uploaded to anyone.
+  'POST /api/listen': async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    try {
+      const text = await transcribe(Buffer.concat(chunks));
+      json(res, 200, { text });
+    } catch (e) {
+      json(res, 500, { error: String(e.message) });
+    }
+  },
+
   'POST /api/compose': async (req, res) => {
     const { selected = [], partner = '', literal = false, mode = 'answer' } = await body(req);
     try {
@@ -145,5 +160,6 @@ createServer(async (req, res) => {
 }).listen(PORT, () => {
   console.log(`\n  StillMe → http://localhost:${PORT}`);
   console.log(`  user: ${profile.name}   voice: ${profile.voiceModel ? 'CLONED' : 'placeholder (not his voice yet)'}`);
-  console.log(`  input: touch + scanning (arrow keys simulate EOG)\n`);
+  console.log(`  input: touch + scanning (arrow keys simulate EOG)`);
+  asrReady().then((ok) => console.log(`  listening: ${ok ? 'whisper.cpp (local — audio never leaves this machine)' : 'MISSING — asr/ not built'}\n`));
 });

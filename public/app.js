@@ -11,6 +11,8 @@
 // That is why you can build and test the entire eye-controlled interface today,
 // with a keyboard, before a single electrode ships.
 
+import { createMic } from '/mic.js';
+
 const $ = (s) => document.querySelector(s);
 const GRID = 8; // 8 tiles + undo = 9 zones. Hard cap: EOG selection degrades past 9.
 
@@ -263,55 +265,41 @@ function reset() {
 
 /* ---------- listening ---------- */
 //
-// DEV ONLY: the browser's SpeechRecognition. In Chrome this sends audio to Google, which
-// breaks the offline promise — so it is labelled on screen, not hidden.
-// SHIP: iOS Speech framework with requiresOnDeviceRecognition = true. Genuinely on-device,
-// free, no network. Same seam: transcript in, tiles out.
+// LOCAL. whisper.cpp on this machine, ~0.15s. The audio is written to a temp file, read by
+// whisper, and deleted. It is never uploaded. Chrome's Web Speech API (which we used before)
+// sends the microphone to Google — unacceptable in an app whose entire claim is that nothing
+// leaves the device. Ship path is the same shape: iOS SFSpeechRecognizer, on-device.
 
-const SR = window.SpeechRecognition ?? window.webkitSpeechRecognition;
-let recog = null;
+let mic = null;
 
 function startListening() {
-  // It silently did nothing here. The button flipped back and the user was left guessing.
-  if (!SR) return toast('This browser cannot listen. Use Chrome, or type it.');
   if (state.listening) return;
+  mic = createMic({
+    onTranscript: (text) => {
+      $('#partner-said').value = text;
+      // Only re-predict on a finished sentence, and only if he hasn't started answering —
+      // yanking the grid out from under his finger mid-selection is unforgivable here.
+      if (!state.selected.length && state.mode === 'answer') loadTiles();
+    },
+    onSpeechStart: () => $('#listen').classList.add('hearing'),
+    onError: (msg) => { toast(msg); stopListening(); },
+  });
+  mic.start().then((ok) => {
+    if (!ok) return;
+    state.listening = true;
+    $('#listen').classList.add('on');
+    $('#listen').textContent = 'Listening…';
+    $('#listen').setAttribute('aria-pressed', 'true');
+  });
+}
 
-  recog = new SR();
-  recog.continuous = true;
-  recog.interimResults = true;
-  recog.lang = 'en-US';
-
-  recog.onresult = (e) => {
-    let final = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) final += e.results[i][0].transcript;
-    }
-    const partial = e.results[e.results.length - 1][0].transcript;
-    $('#partner-said').value = (final || partial).trim();
-    // Only re-predict on a completed sentence — not on every syllable, or the grid
-    // thrashes under his finger while he is trying to aim at it.
-    if (final && !state.selected.length) loadTiles();
-  };
-  // Every one of these used to end in a silent stopListening(). The mic was denied, or
-  // offline, and the button just quietly turned itself off.
-  recog.onerror = (e) => {
-    if (e.error === 'no-speech') return;             // normal: a pause. keep listening.
-    const why = {
-      'not-allowed': 'Microphone blocked. Allow it in the address bar, then tap Listen.',
-      'service-not-allowed': 'Microphone blocked by the browser or OS.',
-      'audio-capture': 'No microphone found.',
-      'network': 'Speech service unreachable (Chrome sends audio to Google — needs network).',
-    }[e.error] ?? `Listening stopped: ${e.error}`;
-    toast(why);
-    stopListening();
-  };
-  recog.onend = () => { if (state.listening) { try { recog.start(); } catch {} } }; // Chrome times out; keep it alive
-
-  try { recog.start(); } catch (e) { return toast(`Could not start the mic: ${e.message}`); }
-  state.listening = true;
-  $('#listen').classList.add('on');
-  $('#listen').textContent = 'Listening…';
-  $('#listen').setAttribute('aria-pressed', 'true');
+function stopListening() {
+  state.listening = false;
+  mic?.stop();
+  mic = null;
+  $('#listen').classList.remove('on', 'hearing');
+  $('#listen').textContent = 'Listen';
+  $('#listen').setAttribute('aria-pressed', 'false');
 }
 
 /* ---------- feedback ---------- */
@@ -333,15 +321,6 @@ function speaking(text) {
   el.hidden = false;
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.hidden = true; }, 6000);
-}
-
-function stopListening() {
-  state.listening = false;
-  try { recog?.stop(); } catch {}
-  recog = null;
-  $('#listen').classList.remove('on');
-  $('#listen').textContent = 'Listen';
-  $('#listen').setAttribute('aria-pressed', 'false');
 }
 
 /* ---------- render ---------- */

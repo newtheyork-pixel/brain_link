@@ -144,3 +144,5 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
   padding: 12px 20px; font-size: 15px; font-weight: 650; z-index: 40;
   max-width: 90vw; text-align: center; }
 .toast[hidden] { display: none; }
+/* the mic is actually hearing someone right now */
+button.listen.hearing { background: rgba(91,141,239,.22); }

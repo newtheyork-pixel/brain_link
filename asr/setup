@@ -1,0 +1,24 @@
+#!/bin/bash
+# Local speech recognition. Audio never leaves this machine.
+#
+# Chrome's Web Speech API uploads the microphone to Google. For an app whose whole claim is
+# "nothing ever leaves the device" — and whose users are dying people talking to their
+# families — that is not a shortcut, it is a lie. So we run whisper.cpp ourselves.
+#
+# Measured: 0.24s for a short sentence, Metal-accelerated, on an M5 Pro.
+set -e
+cd "$(dirname "$0")"
+
+command -v cmake >/dev/null || { echo "need cmake: https://cmake.org/download"; exit 1; }
+
+TMP=$(mktemp -d)
+git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$TMP/w"
+cmake -S "$TMP/w" -B "$TMP/w/build" -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=1
+cmake --build "$TMP/w/build" -j8 --config Release
+
+cp "$TMP/w/build/bin/whisper-cli" .
+cp "$TMP"/w/build/bin/*.dylib .
+curl -fL -o ggml-base.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+rm -rf "$TMP"
+echo "done — whisper.cpp is local. Nothing leaves this machine."
