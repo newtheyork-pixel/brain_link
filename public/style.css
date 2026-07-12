@@ -146,3 +146,12 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 .toast[hidden] { display: none; }
 /* the mic is actually hearing someone right now */
 button.listen.hearing { background: rgba(91,141,239,.22); }
+
+/* Live mic level. Without it, "nothing happened" is indistinguishable from "broken". */
+.meter { height: 4px; background: var(--line); border-radius: 99px; overflow: hidden;
+  margin-top: 8px; }
+.meter[hidden] { display: none; }
+.meter span { display: block; height: 100%; width: 0%; background: var(--accent);
+  border-radius: 99px; transition: width .08s linear; }
+/* words still being spoken — not final yet */
+.partner input.interim { color: var(--muted); font-style: italic; }

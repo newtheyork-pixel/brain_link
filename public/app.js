@@ -274,22 +274,38 @@ let mic = null;
 
 function startListening() {
   if (state.listening) return;
+
   mic = createMic({
-    onTranscript: (text) => {
+    // The words appear WHILE they are being said. A caregiver who has to wait for a lump of
+    // text after a pause has no idea whether the thing is even on.
+    onInterim: (text) => {
       $('#partner-said').value = text;
-      // Only re-predict on a finished sentence, and only if he hasn't started answering —
-      // yanking the grid out from under his finger mid-selection is unforgivable here.
+      $('#partner-said').classList.add('interim');
+    },
+    onFinal: (text) => {
+      $('#partner-said').value = text;
+      $('#partner-said').classList.remove('interim');
+      // Re-predict only on a finished sentence, and never once he has started answering —
+      // yanking the grid out from under his finger mid-selection is unforgivable.
       if (!state.selected.length && state.mode === 'answer') loadTiles();
     },
-    onSpeechStart: () => $('#listen').classList.add('hearing'),
+    // A visible level meter. Without it, a dead mic and a quiet room look identical, and
+    // you are left tapping a button that never says anything back.
+    onLevel: (rms) => {
+      const pct = Math.min(100, Math.round(rms * 900));
+      $('#level').style.width = `${pct}%`;
+      $('#listen').classList.toggle('hearing', pct > 12);
+    },
     onError: (msg) => { toast(msg); stopListening(); },
   });
+
   mic.start().then((ok) => {
     if (!ok) return;
     state.listening = true;
     $('#listen').classList.add('on');
     $('#listen').textContent = 'Listening…';
     $('#listen').setAttribute('aria-pressed', 'true');
+    $('#meter').hidden = false;
   });
 }
 
@@ -300,6 +316,9 @@ function stopListening() {
   $('#listen').classList.remove('on', 'hearing');
   $('#listen').textContent = 'Listen';
   $('#listen').setAttribute('aria-pressed', 'false');
+  $('#partner-said').classList.remove('interim');
+  $('#meter').hidden = true;
+  $('#level').style.width = '0%';
 }
 
 /* ---------- feedback ---------- */
