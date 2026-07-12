@@ -51,19 +51,42 @@ function features(lm, face, matrix) {
   const b = {};
   for (const c of face) b[c.categoryName] = c.score;
 
-  // How far across the eye is the iris? 0 = against one corner, 1 = against the other.
-  // Divided by the eye's own width, so it survives him leaning toward or away from the camera.
-  const across = (iris, inner, outer) => {
-    const w = lm[outer].x - lm[inner].x;
-    return Math.abs(w) < 1e-6 ? 0.5 : (lm[iris].x - lm[inner].x) / w;
-  };
-  const between = (iris, top, bot) => {
-    const h = lm[bot].y - lm[top].y;
-    return Math.abs(h) < 1e-6 ? 0.5 : (lm[iris].y - lm[top].y) / h;
+  // THE TWO EYES WERE CANCELLING EACH OTHER OUT.
+  //
+  // I measured each iris as a fraction from the INNER corner toward the OUTER corner. But "outer"
+  // is in opposite image directions for the two eyes: for one eye the outer corner has a SMALLER
+  // x than the inner, for the other a LARGER one. So the two denominators carried opposite signs.
+  // When he looked right, both irises moved right in the image — and the two normalised readings
+  // moved in OPPOSITE directions and annihilated each other in the average.
+  //
+  // The measured proof: looking from the far left of the screen to the far right moved the signal
+  // by 0.0075. It should move by ~0.2. Thirty times too small, because it was mostly cancelling.
+  //
+  // Fix: measure each iris as an offset from ITS OWN EYE'S CENTRE, in image coordinates. Same
+  // sign for both eyes, always.
+  const irisCentre = (a, z) => {
+    let x = 0, y = 0;
+    for (let i = a; i <= z; i++) { x += lm[i].x; y += lm[i].y; }
+    return { x: x / (z - a + 1), y: y / (z - a + 1) };   // the ring, not one point: 5x less jitter
   };
 
-  const ix = (across(IRIS_L, L_IN, L_OUT) + across(IRIS_R, R_IN, R_OUT)) / 2 - 0.5;
-  const iy = (between(IRIS_L, L_TOP, L_BOT) + between(IRIS_R, R_TOP, R_BOT)) / 2 - 0.5;
+  const eye = (irisA, irisZ, c1, c2, top, bot) => {
+    const ir = irisCentre(irisA, irisZ);
+    const cx = (lm[c1].x + lm[c2].x) / 2;
+    const cy = (lm[c1].y + lm[c2].y) / 2;
+    const w = Math.hypot(lm[c2].x - lm[c1].x, lm[c2].y - lm[c1].y) || 1e-6;
+
+    // Vertical is normalised by eye WIDTH, not eye height. The lid-to-lid distance is tiny and
+    // it moves every time he blinks or squints — dividing by it produced a vertical signal with
+    // a noise reading of 1.7 (i.e. pure garbage). Eye width is rigid and stable.
+    return { x: (ir.x - cx) / w, y: (ir.y - cy) / w };
+  };
+
+  const L = eye(468, 472, L_OUT, L_IN, L_TOP, L_BOT);
+  const R = eye(473, 477, R_IN, R_OUT, R_TOP, R_BOT);
+
+  const ix = (L.x + R.x) / 2;
+  const iy = (L.y + R.y) / 2;
 
   // Head yaw/pitch out of the 4x4 rigid transform (column-major).
   let yaw = 0, pitch = 0;
@@ -76,12 +99,9 @@ function features(lm, face, matrix) {
   const lid = Math.max(b.eyeBlinkLeft ?? 0, b.eyeBlinkRight ?? 0);
   const bothShut = (b.eyeBlinkLeft ?? 0) > BLINK_ON && (b.eyeBlinkRight ?? 0) > BLINK_ON;
 
-  // Cross terms let the fit correct gaze for head turn — looking left with the head turned left
-  // is not the same eye position as looking left with the head straight.
-  return {
-    v: [ix, iy, yaw, pitch, ix * yaw, iy * pitch, 1],
-    lid, bothShut,
-  };
+  // No cross-terms. They multiply two noisy numbers together and hand the result to a model that
+  // has to tell an 8th of a screen apart. Iris and head pose, and nothing else.
+  return { v: [ix, iy, yaw, pitch], lid, bothShut };
 }
 
 /**
@@ -213,6 +233,7 @@ function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {})
 
 export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProgress }) {
   let landmarker = null, video = null, stream = null, backend = '?';
+  let camera = null, irisPx = 0;
   let running = false, calibrating = false;
   let model = null;                       // { wx, wy } once calibrated
   let median = makeMedian();
@@ -305,6 +326,12 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     if (!face?.length || !lm || lm.length < 478) { onFace(false); return; }
     onFace(true);
 
+    // How many pixels wide is the iris, really? Below ~12 the landmark cannot resolve where it
+    // is sitting, and no algorithm downstream can recover that.
+    if (camera) {
+      irisPx = Math.round(Math.hypot(lm[471].x - lm[469].x, lm[471].y - lm[469].y) * camera.w);
+    }
+
     const fRaw = features(lm, face, out.facialTransformationMatrixes?.[0]);
     lastRaw = fRaw.v;
     trackNoise(fRaw.v);
@@ -350,8 +377,17 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       ]);
 
       try {
+        // 640x480 leaves the iris about ten pixels across at laptop distance — the landmark then
+        // quantises to that grid and the jitter IS the signal. Ask for everything the camera has.
         stream = await deadline(
-          navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } }),
+          navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 1280, min: 640 },
+              height: { ideal: 720, min: 480 },
+              frameRate: { ideal: 30 },
+              facingMode: 'user',
+            },
+          }),
           12000, 'camera',
         );
       } catch (e) {
@@ -370,6 +406,9 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
 
       try { if (!landmarker) await deadline(load(), 25000, 'face model'); }
       catch (e) { onError(`Eye tracking unavailable — ${e.message}`); teardown(); return false; }
+
+      const t = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
+      camera = { w: t.width ?? 0, h: t.height ?? 0, fps: t.frameRate ?? 0 };
 
       running = true;
       loop();
@@ -448,6 +487,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     probe() {
       return { backend, calibrated: !!model, running, features: 'iris+head',
         method: 'inverse-distance interpolation (bounded)',
+        camera, irisPx,
         spread: model ? +model.spread().toFixed(2) : null,
         noise: featureNoise() };
     },

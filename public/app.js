@@ -623,10 +623,20 @@ async function signalCheck() {
   const snr = travel / (noise || 1e-6);
 
   const verdict = snr > 8 ? 'good' : snr > 4 ? 'usable' : 'too noisy';
-  $('#gaze-state').textContent = `Signal: travel ${travel.toFixed(3)} vs noise ${noise.toFixed(4)} → ${snr.toFixed(1)}x (${verdict}).`;
-  toast(snr > 4
-    ? `Signal is ${verdict} (${snr.toFixed(1)}x). Now calibrate.`
-    : `Signal too noisy (${snr.toFixed(1)}x). Sit closer, more light on your face, camera at eye level.`);
+  const p = gaze.probe();
+  const cam = p.camera ? `${p.camera.w}x${p.camera.h}` : '?';
+
+  $('#gaze-state').textContent =
+    `${snr.toFixed(1)}x (${verdict}) · travel ${travel.toFixed(3)} / noise ${noise.toFixed(4)} · ${cam}, iris ${p.irisPx}px`;
+
+  // The iris width is the physical limit. Below ~12px the landmark literally cannot tell where
+  // the iris is sitting, and no amount of clever maths downstream recovers it. Say that, rather
+  // than telling him to "recalibrate" at a wall.
+  toast(p.irisPx && p.irisPx < 12
+    ? `Your iris is only ${p.irisPx}px wide — too small to track. Sit closer to the screen.`
+    : snr > 4
+      ? `Signal ${verdict} (${snr.toFixed(1)}x). Now calibrate.`
+      : `Too noisy (${snr.toFixed(1)}x). Sit closer, put more light on your face, camera at eye level.`);
 
   fetch('/api/gazelog', {
     method: 'POST', headers: { 'content-type': 'application/json' },
