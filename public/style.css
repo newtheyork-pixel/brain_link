@@ -103,6 +103,14 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 .candidate:hover { border-color: var(--gold); }
 
 /* Caregiver + researcher controls. Never in his way. */
+/* The drawer used to sit OVER the right-hand tiles — so calibrating or testing from a button
+   inside it asked him to look at words hidden behind the panel he had just opened. Now the page
+   makes room for it: the grid shrinks, and every tile stays visible. */
+body.settings-open main,
+body.settings-open header,
+body.settings-open .partner,
+body.settings-open .actions,
+body.settings-open .composing { padding-right: min(400px, 100%); }
 .settings { position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 100%);
   background: var(--surface); border-left: 1px solid var(--line); z-index: 30;
   padding: 26px; display: flex; flex-direction: column; gap: 18px; overflow-y: auto; }

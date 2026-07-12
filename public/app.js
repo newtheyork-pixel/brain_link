@@ -751,6 +751,14 @@ function beep(hz = 880, len = 0.12) {
 async function testGazeAccuracy() {
   if (!gaze?.calibrated) return toast('Calibrate first.');
 
+  // The settings drawer sits over the right-hand tiles. Testing with it open asked him to look at
+  // words he could not see — which is exactly what happened, and it made the numbers meaningless.
+  clearScreen();
+  await new Promise((r) => setTimeout(r, 400));
+
+  say('Look at each highlighted word.', { instant: true, keep: true });
+  await new Promise((r) => setTimeout(r, 1400));
+
   const tiles = $$('.tile');
   const results = [];
   $('#calib-msg').textContent = 'Look at the highlighted tile';
@@ -897,10 +905,12 @@ $('#partner-said').onchange = () => { if (!state.selected.length) loadTiles(); }
 $('#gear').onclick = () => {
   const open = $('#settings').hidden;
   $('#settings').hidden = !open;
+  document.body.classList.toggle('settings-open', open);   // the grid makes room; nothing hides
   $('#gear').setAttribute('aria-expanded', String(open));
 };
 $('#close-settings').onclick = () => {
   $('#settings').hidden = true;
+  document.body.classList.remove('settings-open');
   $('#gear').setAttribute('aria-expanded', 'false');
 };
 $('#literal').onchange = (e) => { state.literal = e.target.checked; };
@@ -911,8 +921,19 @@ $('#driver').onchange = (e) => {
   if (state.driver === 'gaze') startGaze(); else stopGaze();
   renderGrid();
 };
+// Never let him drive with his eyes while a panel is over a third of the tiles.
+bus.on(() => { if (state.driver === 'gaze') clearScreen(); });
+/** Get the settings panel off the screen. It covers the right column of tiles. */
+function clearScreen() {
+  $('#settings').hidden = true;
+  document.body.classList.remove('settings-open');
+  $('#gear').setAttribute('aria-expanded', 'false');
+}
+
 $('#calibrate').onclick = async () => {
   if (!gaze?.running) return toast('Turn the camera on first.');
+  clearScreen();
+  await new Promise((r) => setTimeout(r, 350));   // let the panel finish getting out of the way
 
   // Calibrate across the area he will actually USE — the tiles — not the corners of the glass,
   // where the eyelid swallows the iris and the readings are lies.
