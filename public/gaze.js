@@ -85,45 +85,72 @@ function features(lm, face, matrix) {
 }
 
 /**
- * Least squares: find the 5-vector w minimising |Xw - t|, via the normal equations.
- * X is [samples x 5] of gaze features, t is the screen coordinate we asked them to look at.
- * Ridge term keeps it from blowing up when someone barely moves their eyes during calibration.
+ * WHY THE DOT FLEW AROUND WHILE HIS EYES WERE STILL.
+ *
+ * I fitted a least-squares LINE from eye-features to screen pixels. With seven near-collinear
+ * features the normal equations are badly conditioned, and the solver answers with ENORMOUS
+ * weights — thousands of pixels per unit of feature. The iris landmark wobbles by a fraction of
+ * a percent between frames (it always does), that wobble gets multiplied by a huge weight, and
+ * the dot leaps across the screen while the man sits perfectly still.
+ *
+ * I built an amplifier and called it a tracker.
+ *
+ * So: no regression. INTERPOLATE INSTEAD.
+ *
+ * Calibration stores, for each of the nine dots, the average eye-feature vector while he looked
+ * at it. At runtime we ask: which of those nine does the eye look most like right now? The
+ * answer is a weighted blend of the nine screen positions — so the output is ALWAYS inside the
+ * region he calibrated. It cannot extrapolate. It cannot amplify. A small wobble in the iris
+ * makes a small wobble in the blend, and nothing else.
+ *
+ * (Shepard / inverse-distance interpolation, in a feature space standardised so that a
+ * millimetre of iris and a degree of head-turn count the same.)
  */
-function solve(X, t, ridge = 1e-4) {
-  const n = X[0].length;
-  const A = Array.from({ length: n }, () => new Float64Array(n));
-  const b = new Float64Array(n);
-  for (let r = 0; r < X.length; r++) {
-    for (let i = 0; i < n; i++) {
-      b[i] += X[r][i] * t[r];
-      for (let j = 0; j < n; j++) A[i][j] += X[r][i] * X[r][j];
-    }
-  }
-  for (let i = 0; i < n; i++) A[i][i] += ridge;
+function buildModel(points) {
+  const dim = points[0].mean.length;
 
-  // Gaussian elimination with partial pivoting.
-  for (let c = 0; c < n; c++) {
-    let p = c;
-    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
-    [A[c], A[p]] = [A[p], A[c]];
-    [b[c], b[p]] = [b[p], b[c]];
-    if (Math.abs(A[c][c]) < 1e-12) continue;
-    for (let r = c + 1; r < n; r++) {
-      const f = A[r][c] / A[c][c];
-      for (let k = c; k < n; k++) A[r][k] -= f * A[c][k];
-      b[r] -= f * b[c];
-    }
+  // Standardise: without this, head-yaw (radians, ~0.3) would drown iris position (~0.05), and
+  // the "nearest" calibration point would be decided almost entirely by how he held his head.
+  const mu = new Float64Array(dim);
+  const sd = new Float64Array(dim);
+  for (const p of points) for (let i = 0; i < dim; i++) mu[i] += p.mean[i] / points.length;
+  for (const p of points) {
+    for (let i = 0; i < dim; i++) sd[i] += (p.mean[i] - mu[i]) ** 2 / points.length;
   }
-  const w = new Float64Array(n);
-  for (let i = n - 1; i >= 0; i--) {
-    let s = b[i];
-    for (let j = i + 1; j < n; j++) s -= A[i][j] * w[j];
-    w[i] = Math.abs(A[i][i]) < 1e-12 ? 0 : s / A[i][i];
-  }
-  return w;
+  for (let i = 0; i < dim; i++) sd[i] = Math.sqrt(sd[i]) || 1e-3;
+
+  const z = (v) => v.map((x, i) => (x - mu[i]) / sd[i]);
+  const centroids = points.map((p) => ({ z: z(p.mean), x: p.x, y: p.y }));
+
+  return {
+    dim,
+    predict(v) {
+      const q = z(v);
+      let wsum = 0, sx = 0, sy = 0;
+      for (const c of centroids) {
+        let d2 = 0;
+        for (let i = 0; i < dim; i++) d2 += (q[i] - c.z[i]) ** 2;
+        // Sharp enough to pick a corner, soft enough to slide smoothly between neighbours.
+        const w = 1 / (d2 * d2 + 0.02);
+        wsum += w; sx += w * c.x; sy += w * c.y;
+      }
+      return [sx / wsum, sy / wsum];   // ALWAYS a blend of calibrated points. Bounded, always.
+    },
+    // How separated were the nine calibration points in feature space? If the eye barely moved
+    // between them, no algorithm on earth can tell them apart, and he deserves to be told.
+    spread() {
+      let min = Infinity;
+      for (let i = 0; i < centroids.length; i++) {
+        for (let j = i + 1; j < centroids.length; j++) {
+          let d2 = 0;
+          for (let k = 0; k < dim; k++) d2 += (centroids[i].z[k] - centroids[j].z[k]) ** 2;
+          min = Math.min(min, Math.sqrt(d2));
+        }
+      }
+      return min;
+    },
+  };
 }
-
-const dot = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
 
 /**
  * THE OUTPUT STAGE. This is where "it just moves forever" was coming from.
@@ -193,7 +220,37 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   let lastTs = -1;
 
   let blinkStart = 0, lidWasShut = false;
+
+  // SMOOTH THE FEATURES, NOT JUST THE OUTPUT.
+  //
+  // I was smoothing the dot AFTER the model had already amplified the noise. By then the damage
+  // is done — you cannot un-amplify. The iris landmark jitters every frame (all of them do); it
+  // has to be steadied BEFORE it reaches the model.
+  let fsm = null;
+  const smoothFeatures = (v) => {
+    if (!fsm) { fsm = [...v]; return fsm; }
+    for (let i = 0; i < v.length; i++) fsm[i] += 0.30 * (v[i] - fsm[i]);
+    return [...fsm];
+  };
+
+  // How much does the raw signal wobble while he holds still? This is the number that decides
+  // whether eye tracking is possible on this camera at all — and it was invisible until now.
+  const noiseBuf = [];
+  function trackNoise(v) {
+    noiseBuf.push([v[0], v[1]]);
+    if (noiseBuf.length > 60) noiseBuf.shift();
+  }
+  function featureNoise() {
+    if (noiseBuf.length < 20) return null;
+    const sd = (k) => {
+      const a = noiseBuf.map((p) => p[k]);
+      const m = a.reduce((x, y) => x + y, 0) / a.length;
+      return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length);
+    };
+    return { irisX: +sd(0).toFixed(4), irisY: +sd(1).toFixed(4) };
+  }
   let lastSample = null;      // the latest gaze point + raw features, for the accuracy test
+  let lastRaw = null;         // the unsmoothed feature vector — the signal check reads this
   let calBucket = [], calResolve = null;
 
   function teardown() {
@@ -248,7 +305,10 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     if (!face?.length || !lm || lm.length < 478) { onFace(false); return; }
     onFace(true);
 
-    const f = features(lm, face, out.facialTransformationMatrixes?.[0]);
+    const fRaw = features(lm, face, out.facialTransformationMatrixes?.[0]);
+    lastRaw = fRaw.v;
+    trackNoise(fRaw.v);
+    const f = { ...fRaw, v: smoothFeatures(fRaw.v) };
 
     // A deliberate blink is a SELECT. Reflex blinks are ~100-150ms and constant; we require the
     // lids to stay shut a beat longer than that, but not so long it's just a rest.
@@ -265,10 +325,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
     if (f.lid > BLINK_ON) return;
 
-    // A LINEAR fit extrapolates without limit: glance past the edge of the calibrated range and
-    // it happily reports a point three screens away, dragging the dot off into space. Clamp it.
-    const rx = Math.max(0, Math.min(window.innerWidth, dot(model.wx, f.v)));
-    const ry = Math.max(0, Math.min(window.innerHeight, dot(model.wy, f.v)));
+    const [rx, ry] = model.predict(f.v);   // bounded by construction — always inside the fit
 
     const now = performance.now();
     const [mx, my] = median(rx, ry);
@@ -319,10 +376,10 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       return true;
     },
 
-    /** Look at each dot. We record where the eyes go, then fit the map from eye → screen. */
+    /** Look at each dot. We record what his eyes LOOK LIKE at each, then interpolate between. */
     async calibrate() {
       if (!running) return false;
-      const X = [], tx = [], ty = [];
+      const points = [];
 
       for (let i = 0; i < CAL_POINTS.length; i++) {
         const [px, py] = CAL_POINTS[i];
@@ -337,71 +394,62 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
           const check = setInterval(() => {
             if (calBucket.length >= SAMPLES_PER_POINT) { clearInterval(check); resolve(); }
           }, 30);
-          setTimeout(() => { clearInterval(check); resolve(); }, 3000);  // don't hang on a lost face
+          setTimeout(() => { clearInterval(check); resolve(); }, 3500);   // never hang on a lost face
         });
         calibrating = false;
 
-        // Drop the first few: the eye is often still travelling when sampling opens.
-        const keep = calBucket.slice(Math.floor(calBucket.length * 0.3));
-        for (const v of keep) {
-          X.push(v);
-          tx.push(px * window.innerWidth);
-          ty.push(py * window.innerHeight);
+        // Drop the first third — the eye is often still travelling when sampling opens.
+        const keep = calBucket.slice(Math.floor(calBucket.length * 0.35));
+        if (keep.length < 6) { onError('Calibration failed — your face was not visible enough.'); return false; }
+
+        // The MEDIAN of each feature, not the mean: one blink during this dot must not drag the
+        // whole point sideways.
+        const dim = keep[0].length;
+        const mean = [];
+        for (let k = 0; k < dim; k++) {
+          const col = keep.map((v) => v[k]).sort((a, b) => a - b);
+          mean.push(col[Math.floor(col.length / 2)]);
         }
+        points.push({ mean, x: px * window.innerWidth, y: py * window.innerHeight, n: keep.length });
       }
 
-      if (X.length < 40) { onError('Calibration failed — your face was not visible enough.'); return false; }
-
-      // FIT, THEN THROW AWAY THE WORST, THEN FIT AGAIN.
-      // Least squares has no defence against a bad sample: one frame where he blinked, or where
-      // the eye was still travelling to the dot, tilts the entire plane. Two refits, each
-      // dropping the worst 20% of residuals, and the fit stops being hostage to a few frames.
-      let wx = solve(X, tx), wy = solve(X, ty);
-      for (let pass = 0; pass < 2; pass++) {
-        const res = X.map((v, i) => Math.hypot(dot(wx, v) - tx[i], dot(wy, v) - ty[i]));
-        const cut = [...res].sort((a, b) => a - b)[Math.floor(res.length * 0.8)];
-        const kx = [], ktx = [], kty = [];
-        for (let i = 0; i < X.length; i++) {
-          if (res[i] <= cut) { kx.push(X[i]); ktx.push(tx[i]); kty.push(ty[i]); }
-        }
-        if (kx.length < 30) break;
-        wx = solve(kx, ktx); wy = solve(kx, kty);
-      }
-
-      model = { wx, wy };
+      model = buildModel(points);
       median = makeMedian();
       fixate = makeFixation();
 
-      // Honest self-check: how far off is the fit on its own training points? If it can't even
-      // reproduce those, the tracking will be useless and the user deserves to know now.
+      // How far apart were the nine points in feature space? If his eyes barely moved between
+      // the corners of the screen — sitting too far back, or a camera that cannot resolve the
+      // iris — then nothing downstream can separate them, and he needs to know THAT, not be
+      // handed a cursor that lies.
+      const spread = model.spread();
+
+      // Honest residual: re-predict each calibration point from its own features.
       let err = 0;
-      const worst = [];
-      for (let i = 0; i < X.length; i++) {
-        const e = Math.hypot(dot(model.wx, X[i]) - tx[i], dot(model.wy, X[i]) - ty[i]);
-        err += e;
-        worst.push(e);
+      for (const pt of points) {
+        const [x, y] = model.predict(pt.mean);
+        err += Math.hypot(x - pt.x, y - pt.y);
       }
-      worst.sort((a, b) => a - b);
-      const px = err / X.length;
+      const errorPx = Math.round(err / points.length);
+
       onCalibrationProgress({
-        state: 'done',
-        errorPx: Math.round(px),
-        p90Px: Math.round(worst[Math.floor(worst.length * 0.9)] ?? px),
-        samples: X.length,
-        backend,
+        state: 'done', errorPx, spread: +spread.toFixed(2), backend,
+        weak: spread < 0.8,
+        samples: points.reduce((a, p) => a + p.n, 0),
       });
       return true;
     },
 
     recalibrate() { model = null; },
 
+    /** The unmapped eye signal itself. The signal check needs this, not the screen point. */
+    raw() { return lastRaw; },
+
     /** The raw signal, for diagnosis. If gaze is wrong, the answer is in here. */
     probe() {
       return { backend, calibrated: !!model, running, features: 'iris+head',
-        model: model ? {
-          wx: [...model.wx].map((n) => +n.toFixed(1)),
-          wy: [...model.wy].map((n) => +n.toFixed(1)),
-        } : null };
+        method: 'inverse-distance interpolation (bounded)',
+        spread: model ? +model.spread().toFixed(2) : null,
+        noise: featureNoise() };
     },
 
     /** Where the gaze lands right now, unsmoothed — used by the accuracy test. */

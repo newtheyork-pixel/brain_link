@@ -562,6 +562,81 @@ async function startGaze() {
 }
 
 /**
+ * SIGNAL CHECK — run this BEFORE calibrating.
+ *
+ * "I'm not moving my eyes and it still moves" is a signal problem, not a calibration problem,
+ * and no amount of recalibrating fixes it. This measures the two things that actually decide
+ * whether eye tracking is possible on this camera, in this light, at this distance:
+ *
+ *   NOISE  — how much the iris reading wobbles while he holds still.
+ *   TRAVEL — how far it moves when he deliberately looks left, then right.
+ *
+ * If TRAVEL is not comfortably larger than NOISE, the camera cannot see his eyes move, and
+ * everything downstream is theatre. Better to say so than to hand him a cursor that lies.
+ */
+async function signalCheck() {
+  if (!gaze?.running) return toast('Turn the camera on first.');
+
+  const grab = async (ms) => {
+    const out = [];
+    const until = performance.now() + ms;
+    while (performance.now() < until) {
+      const s = gaze.raw();
+      if (s) out.push(s);
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    return out;
+  };
+  const meanX = (a) => a.reduce((s, v) => s + v[0], 0) / (a.length || 1);
+  const sdX = (a) => {
+    const m = meanX(a);
+    return Math.sqrt(a.reduce((s, v) => s + (v[0] - m) ** 2, 0) / (a.length || 1));
+  };
+
+  $('#calib').hidden = false;
+  $('#calib-dot').style.display = 'none';
+
+  $('#calib-msg').textContent = 'Hold still. Look at the middle of the screen.';
+  $('#calib-count').textContent = '1 of 3';
+  await new Promise((r) => setTimeout(r, 1200));
+  const still = await grab(1600);
+
+  $('#calib-msg').textContent = 'Now look at the FAR LEFT edge — and hold.';
+  $('#calib-count').textContent = '2 of 3';
+  await new Promise((r) => setTimeout(r, 1400));
+  const left = await grab(1200);
+
+  $('#calib-msg').textContent = 'Now the FAR RIGHT edge — and hold.';
+  $('#calib-count').textContent = '3 of 3';
+  await new Promise((r) => setTimeout(r, 1400));
+  const right = await grab(1200);
+
+  $('#calib').hidden = true;
+  $('#calib-dot').style.display = '';
+
+  if (still.length < 10 || left.length < 6 || right.length < 6) {
+    return toast('Could not see your face well enough. More light, and sit closer.');
+  }
+
+  const noise = sdX(still);
+  const travel = Math.abs(meanX(right) - meanX(left));
+  const snr = travel / (noise || 1e-6);
+
+  const verdict = snr > 8 ? 'good' : snr > 4 ? 'usable' : 'too noisy';
+  $('#gaze-state').textContent = `Signal: travel ${travel.toFixed(3)} vs noise ${noise.toFixed(4)} → ${snr.toFixed(1)}x (${verdict}).`;
+  toast(snr > 4
+    ? `Signal is ${verdict} (${snr.toFixed(1)}x). Now calibrate.`
+    : `Signal too noisy (${snr.toFixed(1)}x). Sit closer, more light on your face, camera at eye level.`);
+
+  fetch('/api/gazelog', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ kind: 'signal', noise: +noise.toFixed(5), travel: +travel.toFixed(4),
+      snr: +snr.toFixed(2), verdict, probe: gaze.probe(),
+      samples: { still: still.length, left: left.length, right: right.length } }),
+  }).catch(() => {});
+}
+
+/**
  * THE ACCURACY TEST.
  *
  * "Does the dot feel about right" is not a measurement. This lights each tile in turn, asks him
@@ -737,6 +812,7 @@ $('#driver').onchange = (e) => {
 };
 $('#calibrate').onclick = () => gaze?.calibrate();
 $('#test-gaze').onclick = testGazeAccuracy;
+$('#signal-check').onclick = signalCheck;
 $('#dwell').oninput = (e) => {
   state.dwellMs = +e.target.value;
   $('#dwell-label').textContent = `Hold a tile for ${(state.dwellMs / 1000).toFixed(1)}s to pick it.`;
