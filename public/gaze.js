@@ -29,8 +29,6 @@ const DEFAULT_CAL = [
   [0.10, 0.5],                [0.90, 0.5],
   [0.12, 0.82], [0.5, 0.84], [0.88, 0.82],
 ];
-const SAMPLES_PER_POINT = 22;      // ~0.7s of frames
-const SETTLE_MS = 600;             // let the eye actually land before we believe it
 const BLINK_ON = 0.55;             // blendshape value above which a lid counts as closed
 const BLINK_MIN_MS = 90;           // shorter than this is a twitch, not a blink
 const BLINK_MAX_MS = 700;          // longer than this is a rest, not a blink
@@ -197,73 +195,113 @@ const dotv = (w, v) => w.reduce((s, wi, i) => s + wi * v[i], 0);
  * So fit BOTH candidates and let leave-one-out cross-validation pick the winner. The data decides
  * which features matter, not me. I have now guessed wrong three times; the guessing stops here.
  */
-const X_VARIANTS = {
-  iris:        (p) => [p.ix, p.iy],
-  'iris+head': (p) => [p.ix, p.iy, p.yaw],
-};
-const Y_VARIANTS = {
-  iris:          (p) => [p.iy, p.ix],
-  'iris+lid':    (p) => [p.iy, p.ix, p.ap],           // the lid is the missing vertical cue
-  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch],
-};
-
 /**
- * Fit one axis. Standardise, quadratic in the first two dimensions, ridge chosen by leave-one-out.
- * Returns the variant that best predicts a point it has never seen.
+ * THE MODEL, now that we have real data.
+ *
+ * Nine points could only ever support a stiff quadratic. With HUNDREDS of samples from a smooth
+ * pursuit we can fit a surface that actually bends — which matters, because the map from eye to
+ * screen is genuinely curved, and a stiff surface splits the difference by being wrong everywhere.
+ *
+ * Radial basis functions: lay Gaussian bumps across the space of eye positions, and let the fit
+ * decide how much of each. Locally flexible, globally smooth, and — with ridge and honest
+ * validation — it cannot run away like the linear fit did.
+ *
+ * X and Y stay separate models. Horizontal is nearly solved by the iris alone; vertical needs the
+ * lid, because a lowered eyelid and a lowered eye look the same to a camera.
  */
-function fitAxis(points, target, variants) {
-  const all = points.map((_, i) => i);
+const N_RBF = 5;   // 5x5 = 25 Gaussian centres across the eye's range
+
+function makeBasis(samples, extract) {
+  const raw = samples.map(extract);
+  const dim = raw[0].length;
+
+  const mu = [], sg = [];
+  for (let k = 0; k < dim; k++) {
+    const col = raw.map((v) => v[k]);
+    const m = col.reduce((s, v) => s + v, 0) / col.length;
+    mu.push(m);
+    sg.push(Math.sqrt(col.reduce((s, v) => s + (v - m) ** 2, 0) / col.length) || 1e-4);
+  }
+  const z = (v) => v.map((x, k) => (x - mu[k]) / sg[k]);
+
+  // Centres on a grid over the first two standardised dimensions — the ones that carry gaze.
+  const centres = [];
+  const lo = -1.8, hi = 1.8, stepC = (hi - lo) / (N_RBF - 1);
+  for (let i = 0; i < N_RBF; i++) {
+    for (let j = 0; j < N_RBF; j++) centres.push([lo + i * stepC, lo + j * stepC]);
+  }
+  const gamma = 1 / (2 * stepC * stepC);   // bumps overlap their neighbours; no bald patches
+
+  return {
+    dim,
+    feat(v) {
+      const q = z(v);
+      const f = [1, ...q];                                  // linear trend (lid, head ride here)
+      for (const c of centres) {
+        const d2 = (q[0] - c[0]) ** 2 + (q[1] - c[1]) ** 2;
+        f.push(Math.exp(-gamma * d2));
+      }
+      return f;
+    },
+  };
+}
+
+/** Fit one axis on `train`, and report the error on data it has NEVER SEEN. */
+function fitAxis(train, test, targetKey, variants) {
   let best = null;
-  const loo = {};
+  const scores = {};
 
   for (const [name, extract] of Object.entries(variants)) {
-    const raw = points.map(extract);
-    const dim = raw[0].length;
-    const mu = [], sg = [];
-    for (let k = 0; k < dim; k++) {
-      const col = raw.map((v) => v[k]);
-      const m = col.reduce((s, v) => s + v, 0) / col.length;
-      mu.push(m);
-      sg.push(Math.sqrt(col.reduce((s, v) => s + (v - m) ** 2, 0) / col.length) || 1e-4);
-    }
-    const feat = (v) => {
-      const z = v.map((x, k) => (x - mu[k]) / sg[k]);
-      return [1, ...z, z[0] * z[0], z[0] * z[1]];
-    };
-    const fit = (idx, lambda) =>
-      ridgeSolve(idx.map((i) => feat(raw[i])), idx.map((i) => target[i]), lambda);
+    const B = makeBasis(train, extract);
+    const X = train.map((s) => B.feat(extract(s)));
+    const t = train.map((s) => s[targetKey]);
 
-    for (const lambda of [0.03, 0.1, 0.3, 1, 3, 10]) {
+    for (const lambda of [0.3, 1, 3, 10, 30, 100]) {
+      const w = ridgeSolve(X, t, lambda);
+      // Honest: a DIFFERENT pass of the calibration, collected at a different time. Not a
+      // random split of the same frames, which would leak — neighbouring frames are near-copies.
       let err = 0;
-      for (let k = 0; k < points.length; k++) {
-        const w = fit(all.filter((i) => i !== k), lambda);
-        err += Math.abs(dotv(w, feat(raw[k])) - target[k]);
-      }
-      err /= points.length;
-      if (loo[name] === undefined || err < loo[name]) loo[name] = Math.round(err);
-      if (!best || err < best.err) best = { err, lambda, name, extract, feat, fit };
+      for (const s of test) err += Math.abs(dotv(w, B.feat(extract(s))) - s[targetKey]);
+      err /= test.length;
+      const key = `${name}`;
+      if (scores[key] === undefined || err < scores[key]) scores[key] = Math.round(err);
+      if (!best || err < best.err) best = { err, lambda, name, extract, B };
     }
   }
 
-  const w = best.fit(all, best.lambda);
+  // Refit the winner on EVERYTHING — the held-out pass was for choosing, and now it is data.
+  const all = [...train, ...test];
+  const Ball = makeBasis(all, best.extract);
+  const w = ridgeSolve(all.map((s) => Ball.feat(best.extract(s))), all.map((s) => s[targetKey]), best.lambda);
+
   return {
-    loo, name: best.name, err: Math.round(best.err), lambda: best.lambda,
-    predict: (p) => dotv(w, best.feat(best.extract(p))),
+    scores, name: best.name, err: Math.round(best.err), lambda: best.lambda,
+    predict: (p) => dotv(w, Ball.feat(best.extract(p))),
     weightMax: Math.round(Math.max(...[...w].map(Math.abs))),
   };
 }
 
-function buildModel(points) {
-  const X = fitAxis(points, points.map((p) => p.x), X_VARIANTS);
-  const Y = fitAxis(points, points.map((p) => p.y), Y_VARIANTS);
+const X_VARIANTS = {
+  iris: (p) => [p.ix, p.iy],
+  'iris+head': (p) => [p.ix, p.iy, p.yaw],
+};
+const Y_VARIANTS = {
+  iris: (p) => [p.iy, p.ix],
+  'iris+lid': (p) => [p.iy, p.ix, p.ap],
+  'iris+lid+head': (p) => [p.iy, p.ix, p.ap, p.pitch],
+};
 
+function buildModel(train, test) {
+  const X = fitAxis(train, test, 'x', X_VARIANTS);
+  const Y = fitAxis(train, test, 'y', Y_VARIANTS);
   return {
-    looErrorPx: Math.round(Math.hypot(X.err, Y.err)),
     errX: X.err, errY: Y.err,
+    looErrorPx: Math.round(Math.hypot(X.err, Y.err)),
     variant: `x:${X.name} y:${Y.name}`,
-    looByVariant: { x: X.loo, y: Y.loo },
+    looByVariant: { x: X.scores, y: Y.scores },
     lambda: `${X.lambda}/${Y.lambda}`,
     weightMax: Math.max(X.weightMax, Y.weightMax),
+    nTrain: train.length, nTest: test.length,
     predict(p) {
       return [
         Math.max(0, Math.min(window.innerWidth, X.predict(p))),
@@ -335,7 +373,7 @@ function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {})
 export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProgress }) {
   let landmarker = null, video = null, stream = null, backend = '?';
   let camera = null, irisPx = 0;
-  let running = false, calibrating = false;
+  let running = false;
   let model = null;                       // { wx, wy } once calibrated
   let median = makeMedian();
   let fixate = makeFixation();
@@ -373,7 +411,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   }
   let lastSample = null;      // the latest gaze point + raw features, for the accuracy test
   let lastRaw = null;         // the unsmoothed feature vector — the signal check reads this
-  let calBucket = [], calResolve = null;
+  let lastLid = 0;            // reject frames where he blinked: they carry no gaze at all
 
   function teardown() {
     running = false;
@@ -435,6 +473,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
 
     const fRaw = features(lm, face, out.facialTransformationMatrixes?.[0]);
     lastRaw = fRaw.v;
+    lastLid = fRaw.lid;
     trackNoise(fRaw.v);
     const f = { ...fRaw, v: smoothFeatures(fRaw.v) };
 
@@ -444,10 +483,9 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     else if (!f.bothShut && lidWasShut) {
       lidWasShut = false;
       const held = performance.now() - blinkStart;
-      if (held > BLINK_MIN_MS && held < BLINK_MAX_MS && !calibrating) onBlink(held);
+      if (held > BLINK_MIN_MS && held < BLINK_MAX_MS) onBlink(held);
     }
 
-    if (calibrating) { calBucket.push(f.v); return; }
     if (!model) return;
 
     // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
@@ -517,77 +555,97 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     },
 
     /** Look at each dot. We record what his eyes LOOK LIKE at each, then interpolate between. */
-    /** targets: normalised [x,y] points to look at. The app passes the real tile centres. */
-    async calibrate(targets) {
+    /**
+     * SMOOTH PURSUIT CALIBRATION.
+     *
+     * Nine dots gave nine data points and a stiff, wrong surface. But the eye is very good at
+     * FOLLOWING a slowly moving target — that is a reflex, not a skill — and while it follows we
+     * can sample continuously. One 40-second pass yields hundreds of (eye → screen) pairs instead
+     * of nine, densely covering the whole working area rather than sampling it at the corners.
+     *
+     * He is going to live inside this device. Five minutes of calibration, once, is nothing set
+     * against years of use — and it is the difference between a toy and a tool.
+     *
+     * TWO PASSES, deliberately. The first trains the model; the second is a held-out validation
+     * collected at a DIFFERENT TIME, on a DIFFERENT PATH. That is an honest error. (Randomly
+     * splitting one pass would leak: neighbouring frames are near-copies of each other.)
+     */
+    async calibrate({ bounds, onSample } = {}) {
       if (!running) return false;
-      const CAL = (targets?.length >= 6) ? targets : DEFAULT_CAL;
-      const points = [];
 
-      for (let i = 0; i < CAL.length; i++) {
-        const [px, py] = CAL[i];
-        onCalibrationProgress({ index: i, total: CAL.length, x: px, y: py, state: 'settle' });
-        await new Promise((r) => setTimeout(r, SETTLE_MS));
+      // Stay inside his working area. The far edges of the glass are where the eyelid swallows the
+      // iris, and those samples taught the model nonsense which it then applied everywhere.
+      const B = bounds ?? { x0: 0.10, x1: 0.90, y0: 0.16, y1: 0.86 };
+      const lerp = (a, b, t) => a + (b - a) * t;
 
-        calBucket = [];
-        calibrating = true;
-        onCalibrationProgress({ index: i, total: CAL.length, x: px, y: py, state: 'sampling' });
-
-        await new Promise((resolve) => {
-          const check = setInterval(() => {
-            if (calBucket.length >= SAMPLES_PER_POINT) { clearInterval(check); resolve(); }
-          }, 30);
-          setTimeout(() => { clearInterval(check); resolve(); }, 3500);   // never hang on a lost face
-        });
-        calibrating = false;
-
-        // Drop the first third — the eye is often still travelling when sampling opens.
-        const keep = calBucket.slice(Math.floor(calBucket.length * 0.35));
-        if (keep.length < 6) { onError('Calibration failed — your face was not visible enough.'); return false; }
-
-        // The MEDIAN of each feature, not the mean: one blink during this dot must not drag the
-        // whole point sideways.
-        const dim = keep[0].length;
-        const med = [];
-        for (let k = 0; k < dim; k++) {
-          const col = keep.map((v) => v[k]).sort((a, b) => a - b);
-          med.push(col[Math.floor(col.length / 2)]);
+      // Serpentine, then the same area traversed the other way. Different paths mean the second
+      // pass is a genuine test, not a rerun.
+      const path = (pass) => {
+        const pts = [];
+        const ROWS = 5, STEPS = 26;
+        for (let r = 0; r < ROWS; r++) {
+          const t = r / (ROWS - 1);
+          for (let i = 0; i < STEPS; i++) {
+            const u = i / (STEPS - 1);
+            const sweep = r % 2 ? 1 - u : u;
+            pts.push(pass === 0
+              ? [lerp(B.x0, B.x1, sweep), lerp(B.y0, B.y1, t)]     // across, then down
+              : [lerp(B.x0, B.x1, t), lerp(B.y0, B.y1, sweep)]);   // down, then across
+          }
         }
-        points.push({
-          ix: med[0], iy: med[1], yaw: med[2], pitch: med[3], ap: med[4],
-          x: px * window.innerWidth, y: py * window.innerHeight,
-          n: keep.length,
-        });
+        return pts;
+      };
+
+      const collected = [[], []];
+      const HOLD = 78;          // ms per waypoint — slow enough for the eye to actually keep up
+      const SETTLE = 3;         // waypoints to discard after each turn, while the eye catches up
+
+      for (let pass = 0; pass < 2; pass++) {
+        const pts = path(pass);
+        onCalibrationProgress({ state: 'pursuit', pass, total: 2, x: pts[0][0], y: pts[0][1],
+          progress: 0 });
+        await new Promise((r) => setTimeout(r, 1400));   // let him find the dot before it moves
+
+        for (let i = 0; i < pts.length; i++) {
+          const [px, py] = pts[i];
+          onCalibrationProgress({ state: 'pursuit', pass, total: 2, x: px, y: py,
+            progress: (i + 1) / pts.length });
+
+          const until = performance.now() + HOLD;
+          while (performance.now() < until) {
+            await new Promise((r) => setTimeout(r, 16));
+            if (!lastRaw || i < SETTLE) continue;
+            if (lastLid > BLINK_ON) continue;            // he blinked; that frame is worthless
+            collected[pass].push({
+              ix: lastRaw[0], iy: lastRaw[1], yaw: lastRaw[2], pitch: lastRaw[3], ap: lastRaw[4],
+              x: px * window.innerWidth, y: py * window.innerHeight,
+            });
+          }
+          onSample?.(collected[0].length + collected[1].length);
+        }
       }
 
-      model = buildModel(points);
+      const [train, test] = collected;
+      if (train.length < 60 || test.length < 40) {
+        onError('Calibration failed — your face was not visible enough. More light, sit closer.');
+        return false;
+      }
+
+      model = buildModel(train, test);
       median = makeMedian();
       fixate = makeFixation();
 
-      // The LEAVE-ONE-OUT error: fit on eight dots, predict the ninth, measure THAT. The old
-      // number (5px) was the model grading itself on data it had memorised. This one cannot lie.
-      const errorPx = model.looErrorPx;
-
-      // Judge each axis against ITS OWN tile dimension. Horizontal was already fine (74px in a
-      // 378px tile) while vertical was failing (121px, with 300px outliers) — and one blended
-      // number hid that completely for three rounds.
       const t = document.querySelector('.tile')?.getBoundingClientRect();
       const tileW = t?.width || window.innerWidth / 4;
       const tileH = t?.height || window.innerHeight / 2;
       const usable = model.errX < tileW * 0.45 && model.errY < tileH * 0.45;
 
       onCalibrationProgress({
-        state: 'done', errorPx, usable, backend, errX: model.errX, errY: model.errY,
+        state: 'done', errorPx: model.looErrorPx, errX: model.errX, errY: model.errY,
+        usable, backend, variant: model.variant, looByVariant: model.looByVariant,
         lambda: model.lambda, weightMax: model.weightMax,
-        variant: model.variant, looByVariant: model.looByVariant,
+        samples: train.length + test.length, nTrain: model.nTrain, nTest: model.nTest,
         tile: { w: Math.round(tileW), h: Math.round(tileH) },
-        samples: points.reduce((a, p) => a + p.n, 0),
-        // The nine points themselves. Without these I am guessing at the shape of a signal I
-        // cannot see — and I have now guessed wrong three times.
-        points: points.map((p) => ({
-          x: Math.round(p.x), y: Math.round(p.y),
-          ix: +p.ix.toFixed(4), iy: +p.iy.toFixed(4),
-          yaw: +p.yaw.toFixed(4), pitch: +p.pitch.toFixed(4), ap: +p.ap.toFixed(4),
-        })),
       });
       return true;
     },

@@ -207,3 +207,11 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
 /* the eye has landed and is holding — the dwell is now counting */
 .gaze-dot.locked { background: rgba(224,179,84,.45); border-color: var(--gold);
   width: 18px; height: 18px; margin: -9px 0 0 -9px; }
+/* smooth pursuit: the dot moves and he follows it. Make it easy to lock on to. */
+.calib-dot.pursuit { transition: left .08s linear, top .08s linear;
+  background: var(--gold); box-shadow: 0 0 0 10px rgba(224,179,84,.18); }
+.calib-track { position: absolute; bottom: 0; left: 0; right: 0; height: 4px;
+  background: var(--line); }
+.calib-track span { display: block; height: 100%; background: var(--accent);
+  transition: width .1s linear; }
+.calib-track span[hidden] { display: none; }

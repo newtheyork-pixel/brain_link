@@ -536,9 +536,16 @@ async function startGaze() {
         // spoken in his voice — so say so, instead of congratulating him on a broken fit.
         // Which model won, and what each scored. If "head" wins, he is aiming with his head and
         // not his eyes — and that is a fact about him, not a bug to hide.
-        const by = Object.entries(p.looByVariant ?? {}).map(([k, v]) => `${k} ${v}px`).join(' · ');
+        $('#calib-bar').hidden = true;
         $('#gaze-state').textContent =
-          `X ±${p.errX}px / Y ±${p.errY}px (tile ${p.tile.w}x${p.tile.h}) · ${p.variant} · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+          `X ±${p.errX}px / Y ±${p.errY}px · tile ${p.tile.w}x${p.tile.h} · ${p.samples} samples · ${p.variant} · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
+        // Save it. He is going to live with this device; he should not have to re-teach it his
+        // own eyes every time he opens the app.
+        fetch('/api/gazelog', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'calibration', ...p,
+            screen: { w: window.innerWidth, h: window.innerHeight }, probe: gaze?.probe() }),
+        }).catch(() => {});
         // Judge each axis against its OWN tile dimension. Horizontal was already fine while
         // vertical was failing, and a single blended number hid that completely.
         const okX = p.errX < p.tile.w * 0.45, okY = p.errY < p.tile.h * 0.45;
@@ -561,6 +568,20 @@ async function startGaze() {
       d.style.left = `${p.x * 100}%`;
       d.style.top = `${p.y * 100}%`;
       d.classList.toggle('sampling', p.state === 'sampling');
+
+      if (p.state === 'pursuit') {
+        // The dot MOVES and he follows it. Following a slowly moving target is a reflex, not a
+        // skill — which is why this collects hundreds of clean samples where nine dots gave nine.
+        d.classList.add('pursuit');
+        $('#calib-msg').textContent = 'Follow the dot with your eyes.';
+        $('#calib-msg').style.left = '50%';
+        $('#calib-msg').style.top = '92%';
+        $('#calib-bar').style.width = `${Math.round(((p.pass + p.progress) / p.total) * 100)}%`;
+        $('#calib-bar').hidden = false;
+        return;
+      }
+      d.classList.remove('pursuit');
+      $('#calib-bar').hidden = true;
 
       const m = $('#calib-msg');
       m.textContent = p.state === 'sampling' ? 'Hold it…' : 'Look at the dot';
@@ -890,20 +911,23 @@ $('#driver').onchange = (e) => {
   if (state.driver === 'gaze') startGaze(); else stopGaze();
   renderGrid();
 };
-$('#calibrate').onclick = () => {
-  // Calibrate on the REAL tile centres, plus the centre and a ring just outside them. He never
-  // looks at the corner of the glass; he looks at words. Teach the model where the words are.
-  const t = $$('.tile').map((el) => {
-    const r = el.getBoundingClientRect();
-    return [(r.left + r.width / 2) / window.innerWidth, (r.top + r.height / 2) / window.innerHeight];
-  });
-  const targets = t.length === 8
-    ? [[0.5, 0.5], ...t,
-       // a modest ring outside the grid, so the fit interpolates across his working area
-       // instead of extrapolating past the last thing it has ever seen
-       [0.06, 0.5], [0.94, 0.5], [0.5, 0.14], [0.5, 0.88]]
-    : null;
-  gaze?.calibrate(targets);
+$('#calibrate').onclick = async () => {
+  if (!gaze?.running) return toast('Turn the camera on first.');
+
+  // Calibrate across the area he will actually USE — the tiles — not the corners of the glass,
+  // where the eyelid swallows the iris and the readings are lies.
+  const tiles = $$('.tile').map((el) => el.getBoundingClientRect());
+  const bounds = tiles.length
+    ? {
+        x0: Math.max(0.06, (Math.min(...tiles.map((r) => r.left)) + 40) / window.innerWidth),
+        x1: Math.min(0.94, (Math.max(...tiles.map((r) => r.right)) - 40) / window.innerWidth),
+        y0: Math.max(0.10, (Math.min(...tiles.map((r) => r.top)) + 30) / window.innerHeight),
+        y1: Math.min(0.92, (Math.max(...tiles.map((r) => r.bottom)) - 30) / window.innerHeight),
+      }
+    : undefined;
+
+  say('Follow the dot with your eyes. Keep your head still.', { instant: true, keep: true });
+  await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
 };
 $('#test-gaze').onclick = testGazeAccuracy;
 $('#signal-check').onclick = signalCheck;
