@@ -19,6 +19,7 @@ import { createGaze } from '/gaze.js';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
+const CONFIRM_BLINK_MS = 300;   // a blink this long is deliberate, not a reflex (~100-150ms)
 const SAY = '__say__';
 const URGENT = '__urgent__';
 
@@ -35,6 +36,7 @@ const state = {
   mode: 'answer',   // answer | ask | tell — the only way he gets to start a conversation
   coreSlots: 2,     // tiles that never move. Motor learning vs prediction — a measured knob.
   dwellMs: 900,
+  confirmBy: 'blink',   // 'blink' = look then blink to say; 'dwell' = look and hold
   pinned: 0,
   startedAt: null,
   selections: 0,
@@ -511,7 +513,7 @@ function resetDwell() {
   dwellTile = -1;
   dwellStart = 0;
   dwellTrace = [];
-  $$('.tile').forEach((t) => t.style.setProperty('--dwell', '0'));
+  $$('.tile').forEach((t) => { t.style.setProperty('--dwell', '0'); t.classList.remove('armed'); });
 }
 
 // Gaze-dwell over the numbered sentence options. Bigger, forgiving targets — there are only a
@@ -585,41 +587,50 @@ function onGazePoint(x, y, locked) {
   candidateFrames = 0;
   if (i < 0) return;
 
-  // The dwell only accumulates while the eye is HOLDING. If he is still moving, he has not
-  // chosen yet — and a dwell that fills while the eye is in flight is a misfire waiting to
-  // happen, which on this device means a word he did not mean, spoken aloud in his voice.
+  // He is fixated on tile i — it is now ARMED. How he commits it depends on the setting:
+  //   'blink' (default): he blinks to confirm. No dwell timer runs, so nothing fires while he
+  //           just reads the grid. A blink is faster and far less fatiguing than holding a stare.
+  //   'dwell': he holds his gaze and a ring fills. For someone who cannot blink deliberately.
   if (!locked) { dwellStart = performance.now(); return; }
+
+  if (state.confirmBy === 'blink') {
+    $$('.tile')[i]?.classList.add('armed');   // "blink to say this one"
+    return;
+  }
 
   dwellTrace.push([x, y]);
   const frac = Math.min(1, (performance.now() - dwellStart) / state.dwellMs);
   $$('.tile')[i]?.style.setProperty('--dwell', String(frac));
-  if (frac >= 1) {
-    // He just told us where he was looking: the tile he picked. Two things happen with that free,
-    // correctly-labelled sample.
-    const r = $$('.tile')[i]?.getBoundingClientRect();
-    if (r) {
-      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-      if (dwellTrace.length > 3) {
-        const mx = dwellTrace.reduce((s2, p) => s2 + p[0], 0) / dwellTrace.length;
-        const my = dwellTrace.reduce((s2, p) => s2 + p[1], 0) / dwellTrace.length;
-        gaze?.nudge(cx - mx, cy - my);            // 1) instant DC re-anchor
-      }
-      // 2) LEARN it into the terrain map, at the CURRENT raw eye-features paired with the tile
-      // centre. Over hours this refits the whole model to how he actually sits. Remember the id
-      // so we can retract it if he immediately undoes the word (a mis-select is a poisoned label).
-      const raw = gaze?.raw();
-      if (raw) {
-        lastLearnId = gaze.learn(
-          { ix: raw[0], iy: raw[1], yaw: raw[2], pitch: raw[3], ap: raw[4], nx: raw[5], ny: raw[6], sc: raw[7] },
-          cx, cy);
-        lastLearnAt = performance.now();
-        scheduleGazeSave();
-      }
+  if (frac >= 1) commitGazeTile(i);
+}
+
+/**
+ * Commit the armed tile — from a completed dwell OR a confirming blink. Both are the same event:
+ * "his gaze was on this tile and he chose it." So both re-anchor the bias, learn the sample into
+ * the terrain map, and fire the selection. Sharing this is what keeps blink-confirm as smart as
+ * dwell — it improves the calibration exactly the same way.
+ */
+function commitGazeTile(i) {
+  const r = $$('.tile')[i]?.getBoundingClientRect();
+  if (r) {
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    if (dwellTrace.length > 3) {
+      const mx = dwellTrace.reduce((s2, p) => s2 + p[0], 0) / dwellTrace.length;
+      const my = dwellTrace.reduce((s2, p) => s2 + p[1], 0) / dwellTrace.length;
+      gaze?.nudge(cx - mx, cy - my);
     }
-    resetDwell();
-    dwellTile = -2;                    // refractory: don't instantly re-fire on the same tile
-    bus.emit('SELECT');
+    const raw = gaze?.raw();
+    if (raw) {
+      lastLearnId = gaze.learn(
+        { ix: raw[0], iy: raw[1], yaw: raw[2], pitch: raw[3], ap: raw[4], nx: raw[5], ny: raw[6], sc: raw[7] },
+        cx, cy);
+      lastLearnAt = performance.now();
+      scheduleGazeSave();
+    }
   }
+  resetDwell();
+  dwellTile = -2;                      // refractory: don't instantly re-fire on the same tile
+  bus.emit('SELECT');
 }
 
 // If he undoes within a few seconds of a gaze pick, that selection was probably WRONG — retract
@@ -636,7 +647,7 @@ async function startGaze() {
   if (gaze) return;
   const g = createGaze({
     onGaze: onGazePoint,
-    onBlink: (kind) => {
+    onBlink: (kind, held) => {
       if (!$('#calib').hidden) return;                 // never during calibration
 
       // In the sentence sheet, blinks are the whole interface: quick blink -> next numbered
@@ -647,10 +658,8 @@ async function startGaze() {
         return;
       }
 
-      // BLINK DRIVER: he selects entirely by blinking, no gaze pointing required. A quick blink
-      // steps the cursor to the next tile; a held blink selects it. This is single-switch
-      // scanning with the eyelid as the switch — the right fit when gaze can't land reliably but
-      // lid control remains.
+      // BLINK DRIVER: he selects entirely by blinking, no gaze pointing. Quick blink steps the
+      // cursor to the next tile; held blink selects it (single-switch scanning, eyelid as switch).
       if (state.driver === 'blink') {
         if (state.speaking && !state.urgent) return;
         if (kind === 'short') moveCursor(1);
@@ -658,12 +667,17 @@ async function startGaze() {
         return;
       }
 
-      // EYES DRIVER: a blink is a SECOND way to confirm what he is already dwelling on — never a
-      // first (a webcam can't tell a deliberate blink from a reflex, and a reflex must never fire
-      // a word). A held blink confirms; a quick one is ignored here.
-      if (kind === 'long' && dwellTile >= 0 && !state.speaking) {
-        resetDwell();
-        bus.emit('SELECT');
+      // EYES DRIVER, blink-confirm: he LOOKS at a tile (it arms), then BLINKS to say it. The gaze
+      // does the pointing; the blink is the click. Require a clearly-deliberate blink — a reflex
+      // (~100-150ms) must never speak a word — but he does not have to hold a long stare.
+      if (state.confirmBy === 'blink' && held >= CONFIRM_BLINK_MS && dwellTile >= 0 && !state.speaking) {
+        commitGazeTile(dwellTile);
+        return;
+      }
+      // EYES DRIVER, dwell mode: a held blink is a SECOND way to confirm the tile the dwell is
+      // already filling on.
+      if (state.confirmBy === 'dwell' && kind === 'long' && dwellTile >= 0 && !state.speaking) {
+        commitGazeTile(dwellTile);
       }
     },
     onFace: (found) => {
@@ -1124,6 +1138,7 @@ $('#driver').onchange = (e) => {
   const cam = state.driver === 'gaze' || state.driver === 'blink';   // both need the camera
   $('#scan-help').hidden = state.driver !== 'scan';
   $('#blink-help').hidden = state.driver !== 'blink';
+  $('#confirm-row').hidden = state.driver !== 'gaze';   // look-then-blink vs dwell is an Eyes-mode choice
   // Full-bleed for both camera drivers: the vertical half-tile is the error budget, and at the
   // default layout it is 144px (~1.6°) — too tight. Shrinking the chrome raises it ~44%.
   document.body.classList.toggle('gaze-mode', cam);
