@@ -268,6 +268,8 @@ body.gaze-mode .gear-float { display: flex; }
 /* Eyes mode, look-then-blink: the tile he is looking at is ARMED — a clear "blink to say this". */
 .tile.armed { border-color: var(--gold); background: rgba(224,179,84,.14);
   box-shadow: 0 0 0 3px rgba(224,179,84,.35); }
-.tile.armed::after { content: "blink to say"; position: absolute; bottom: 8px; left: 0; right: 0;
+.tile.armed::after { content: "slow blink to say"; position: absolute; bottom: 8px; left: 0; right: 0;
   text-align: center; font-size: 12px; font-weight: 650; color: var(--gold);
   letter-spacing: .04em; text-transform: uppercase; opacity: .85; }
+/* a blink was seen: a quick flash of the gaze dot */
+.gaze-dot.pip { background: var(--gold); border-color: var(--gold); transform: scale(1.5); }

@@ -29,7 +29,9 @@ const DEFAULT_CAL = [
   [0.10, 0.5],                [0.90, 0.5],
   [0.12, 0.82], [0.5, 0.84], [0.88, 0.82],
 ];
-const BLINK_ON = 0.55;             // blendshape value above which a lid counts as closed
+const BLINK_ON = 0.6;              // lid counts as SHUT above this...
+const BLINK_OFF = 0.45;            // ...and OPEN again only below this (hysteresis: a one-frame
+                                  // dip must not split one blink into two)
 // Two deliberate-blink lengths, so blinks can both NAVIGATE and CONFIRM:
 //   short  (a quick, decided blink)  -> move to the next option
 //   long   (eyes held shut a beat)   -> say the highlighted option
@@ -134,8 +136,9 @@ function features(lm, face, matrix) {
 
   const lid = Math.max(b.eyeBlinkLeft ?? 0, b.eyeBlinkRight ?? 0);
   const bothShut = (b.eyeBlinkLeft ?? 0) > BLINK_ON && (b.eyeBlinkRight ?? 0) > BLINK_ON;
+  const bothOpen = (b.eyeBlinkLeft ?? 0) < BLINK_OFF && (b.eyeBlinkRight ?? 0) < BLINK_OFF;
 
-  return { v: [ix, iy, yaw, pitch, ap, nx, ny, sc], lid, bothShut };
+  return { v: [ix, iy, yaw, pitch, ap, nx, ny, sc], lid, bothShut, bothOpen };
 }
 
 /**
@@ -397,7 +400,13 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     const cut = Math.floor(terrain.length * 0.8);
     const train = terrain.slice(0, cut), test = terrain.slice(cut);
     if (train.length < 60 || test.length < 20) return false;
-    model = buildModel(train, test);
+
+    const next = buildModel(train, test);
+    // A refit must never REPLACE a good calibration with a worse or broken one. If the new fit is
+    // NaN, or much looser than what we had, keep the incumbent — learning should only help.
+    if (!Number.isFinite(next.errX) || !Number.isFinite(next.errY)) return false;
+    if (model && (next.errX > model.errX * 1.8 + 40 || next.errY > model.errY * 1.8 + 40)) return false;
+    model = next;
     return true;
   }
   let median = makeMedian();
@@ -436,10 +445,12 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   }
   let lastSample = null;      // the latest gaze point + raw features, for the accuracy test
   let lastRaw = null;         // the unsmoothed feature vector — the signal check reads this
+  let lastFrameAt = 0, detectFails = 0, stallTimer = null;
   let lastLid = 0;            // reject frames where he blinked: they carry no gaze at all
 
   function teardown() {
     running = false;
+    clearInterval(stallTimer);
     stream?.getTracks().forEach((t) => t.stop());
     video?.remove();
     video = stream = null;
@@ -479,10 +490,16 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
 
     if (video.readyState < 2 || video.currentTime === lastTs) return;
     lastTs = video.currentTime;
+    lastFrameAt = performance.now();       // for the stall watchdog
 
     let out;
-    try { out = landmarker.detectForVideo(video, performance.now()); }
-    catch { return; }
+    try { out = landmarker.detectForVideo(video, performance.now()); detectFails = 0; }
+    catch {
+      // A camera that throws every frame would freeze the dot silently. Count the failures and
+      // surface it rather than leaving him staring at a dead cursor.
+      if (++detectFails === 30) onError('Eye tracking stopped — turn the camera off and on again.');
+      return;
+    }
 
     const face = out.faceBlendshapes?.[0]?.categories;
     const lm = out.faceLandmarks?.[0];
@@ -502,10 +519,11 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     trackNoise(fRaw.v);
     const f = { ...fRaw, v: smoothFeatures(fRaw.v) };
 
-    // Classify the blink by how long the lids stayed shut: a quick blink is "next", a held blink
-    // is "say it". Reflex blinks (~100-150ms) fall below both windows and are ignored.
+    // Classify the blink by how long the lids stayed shut. Hysteresis: the lids count as shut above
+    // 0.6 and are only "open again" below 0.45 — a single mid-blink dip can't split one blink into
+    // two (which used to fire an early commit or a double step).
     if (f.bothShut && !lidWasShut) { lidWasShut = true; blinkStart = performance.now(); }
-    else if (!f.bothShut && lidWasShut) {
+    else if (f.bothOpen && lidWasShut) {
       lidWasShut = false;
       const held = performance.now() - blinkStart;
       if (held >= BLINK_SHORT_MIN && held <= BLINK_SHORT_MAX) onBlink('short', held);
@@ -577,7 +595,20 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       const t = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
       camera = { w: t.width ?? 0, h: t.height ?? 0, fps: t.frameRate ?? 0 };
 
+      // The camera track ending (unplugged, revoked, grabbed by another app) is a hard failure.
+      stream.getVideoTracks()[0]?.addEventListener('ended', () => onError('The camera was disconnected.'));
+
       running = true;
+      lastFrameAt = performance.now();
+      // Liveness watchdog: if frames stop arriving for ~2s while we think we are running, say so.
+      clearInterval(stallTimer);
+      stallTimer = setInterval(() => {
+        if (running && performance.now() - lastFrameAt > 2000) {
+          onFace(false);
+          onError('Camera stopped sending frames — check it is not covered or in use elsewhere.');
+        }
+      }, 1000);
+
       loop();
       return true;
     },
@@ -737,11 +768,28 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     },
 
     /** Persist / restore the whole terrain map, so he never re-teaches the app his own eyes. */
-    export() { return model ? { v: 2, terrain, bias } : null; },
+    export() {
+      return model ? { v: 2, terrain, bias, sw: window.innerWidth, sh: window.innerHeight } : null;
+    },
     import(saved) {
-      if (!saved?.terrain?.length) return false;
-      terrain = saved.terrain.slice(-TERRAIN_CAP);
-      bias = saved.bias ?? { x: 0, y: 0 };
+      if (saved?.v !== 2 || !Array.isArray(saved.terrain) || !saved.terrain.length) return false;
+
+      // The stored screen coords are absolute pixels. If the window is a different size now (new
+      // monitor, resized, rotated), rescale every point — otherwise every prediction is stretched
+      // and the store fills with mixed-coordinate poison.
+      const sw = saved.sw || window.innerWidth, sh = saved.sh || window.innerHeight;
+      const kx = window.innerWidth / sw, ky = window.innerHeight / sh;
+
+      // Keep only fully-finite samples — a corrupt blob must not become NaN weights reported as
+      // "remembered your eyes".
+      const clean = saved.terrain.filter((s) =>
+        ['ix', 'iy', 'yaw', 'pitch', 'ap', 'nx', 'ny', 'sc', 'x', 'y'].every((k) => Number.isFinite(s[k])));
+      if (clean.length < 100) return false;
+
+      terrain = clean.slice(-TERRAIN_CAP).map((s) => ({ ...s, x: s.x * kx, y: s.y * ky }));
+      learnId = terrain.reduce((m, s) => (s.id > m ? s.id : m), 0);   // or retract() splices wrong ids
+      const b = saved.bias ?? { x: 0, y: 0 };
+      bias = { x: (Number.isFinite(b.x) ? b.x : 0) * kx, y: (Number.isFinite(b.y) ? b.y : 0) * ky };
       median = makeMedian();
       fixate = makeFixation();
       return rebuild();

@@ -19,7 +19,8 @@ import { createGaze } from '/gaze.js';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
-const CONFIRM_BLINK_MS = 300;   // a blink this long is deliberate, not a reflex (~100-150ms)
+const CONFIRM_BLINK_MS = 500;   // a held, unmistakably-deliberate blink. 300ms overlapped natural
+                                // blinks; a word wrongly spoken in his voice is the worst failure here.
 const SAY = '__say__';
 const URGENT = '__urgent__';
 
@@ -277,27 +278,40 @@ function showConfirm(candidates) {
     b.dataset.text = c;
     box.appendChild(b);
   });
-  sheetIdx = 0;
-  $('#sheet-hint').hidden = state.driver !== 'gaze';
+  openConfirm();
+}
+
+// Every path that shows the sheet goes through here, so its selection state can never be stale.
+// A reopened sheet with a leftover sheetDwellStart used to fire an option with zero dwell.
+function openConfirm() {
+  sheetIdx = -1;                 // NOTHING pre-armed: a lone long-blink must not speak option 1
+  sheetDwellIdx = -1;
+  sheetDwellStart = 0;
+  sheetArmed = false;
+  $('#sheet-hint').hidden = state.driver !== 'gaze' && state.driver !== 'blink';
   $('#confirm').hidden = false;
   highlightSheet();
-  $$('.candidate')[0]?.focus();
 }
 
 const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+let sheetArmed = false;   // has he moved to an option yet? a long blink before this does nothing.
 /** Move the highlight across the numbered options + Back, and show which one is current. */
 function highlightSheet() {
   const opts = [...$$('.candidate'), $('#cancel')];
-  opts.forEach((o, i) => o.classList.toggle('cursor', i === sheetIdx));
-  opts[sheetIdx]?.focus();
+  opts.forEach((o, i) => o.classList.toggle('cursor', i === sheetIdx && sheetIdx >= 0));
+  if (sheetIdx >= 0) opts[sheetIdx]?.focus();
 }
 function sheetNext() {
   const n = $$('.candidate').length + 1;   // +1 for Back
-  sheetIdx = (sheetIdx + 1) % n;
+  sheetIdx = (sheetIdx + 1 + n) % n;       // from -1, first step lands on option 1
+  sheetArmed = true;
   highlightSheet();
 }
 function sheetConfirm() {
+  // Never fire an option he hasn't landed on. A single long blink on a just-opened sheet must
+  // not speak candidate 1 — he has to move to it first (a short blink, or a gaze dwell).
+  if (!sheetArmed || sheetIdx < 0) return;
   [...$$('.candidate'), $('#cancel')][sheetIdx]?.click();
 }
 
@@ -369,7 +383,9 @@ async function say(text, { instant = false, keep = false, interrupt = false } = 
       ? 'The browser blocked the sound. Tap anywhere on the page, then try again.'
       : `Could not speak: ${e.message}`);
     // NOT logged, NOT reset. His words stay on screen so he can try again without rebuilding.
-    if (!instant && state.selected.length) $('#confirm').hidden = false;
+    // Reopen through openConfirm() so the sheet's dwell/arm state is reset — reopening it raw used
+    // to fire an option with zero dwell from leftover state.
+    if (!instant && state.selected.length && $$('.candidate').length) openConfirm();
   }
 }
 
@@ -500,6 +516,18 @@ function tileUnder(x, y) {
   return -1;
 }
 
+// The two controls are gaze targets too. Which one is his gaze inside?
+let armedControl = null;   // 'say' | 'urgent' | null
+function controlUnder(x, y) {
+  for (const [id, name] of [['#compose', 'say'], ['#urgent', 'urgent']]) {
+    const el = $(id);
+    if (!el || el.disabled) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return name;
+  }
+  return null;
+}
+
 function tileAt(x, y) {
   const tiles = $$('.tile');
   for (let i = 0; i < tiles.length; i++) {
@@ -509,11 +537,18 @@ function tileAt(x, y) {
   return -1;
 }
 
+let armedTile = -1;
+let lastCommitAt = 0;
+const clearArmed = () => [...$$('.tile'), $('#compose'), $('#urgent')].forEach((t) => t?.classList.remove('armed'));
+
 function resetDwell() {
   dwellTile = -1;
   dwellStart = 0;
   dwellTrace = [];
-  $$('.tile').forEach((t) => { t.style.setProperty('--dwell', '0'); t.classList.remove('armed'); });
+  armedTile = -1;
+  armedControl = null;
+  $$('.tile').forEach((t) => { t.style.setProperty('--dwell', '0'); });
+  clearArmed();
 }
 
 // Gaze-dwell over the numbered sentence options. Bigger, forgiving targets — there are only a
@@ -528,14 +563,21 @@ function dwellOverSheet(x, y, locked) {
   }
   if (hit < 0) { sheetDwellIdx = -1; opts.forEach((o) => o.style.setProperty('--dwell', '0')); return; }
 
+  // Looking at an option ARMS it (so a blink can say it), and highlights it — every frame, so the
+  // highlighted option and the one a blink fires can never diverge.
+  sheetIdx = hit;
+  sheetArmed = true;
+  highlightSheet();
+
   if (hit !== sheetDwellIdx) {
     opts.forEach((o) => o.style.setProperty('--dwell', '0'));
     sheetDwellIdx = hit;
     sheetDwellStart = performance.now();
-    sheetIdx = hit;
-    highlightSheet();
     return;
   }
+  // Only DWELL mode auto-fires by holding a gaze. In blink mode (the default) looking at an option
+  // just arms it — he still has to blink — so merely READING the options never speaks one.
+  if (state.confirmBy !== 'dwell') return;
   if (!locked) { sheetDwellStart = performance.now(); return; }
   const frac = Math.min(1, (performance.now() - sheetDwellStart) / state.dwellMs);
   opts[hit].style.setProperty('--dwell', String(frac));
@@ -567,6 +609,16 @@ function onGazePoint(x, y, locked) {
   // to dwell-select even mid-utterance (it interrupts).
   if (state.speaking && !state.urgent) return resetDwell();
 
+  // "Say it" and "Urgent" are gaze targets too. Without this an eyes-only user can build a
+  // sentence and never speak it, and can never reach the emergency grid.
+  const ctrl = controlUnder(x, y);
+  if (ctrl && locked) {
+    if (armedControl !== ctrl) { clearArmed(); armedControl = ctrl; dwellTile = -1; armedTile = -1;
+      $(ctrl === 'say' ? '#compose' : '#urgent')?.classList.add('armed'); }
+    return;
+  }
+  if (armedControl && !ctrl) { armedControl = null; clearArmed(); }
+
   const i = tileUnder(x, y);
 
   // Only accept a tile change once the gaze has agreed with itself for several frames. Without
@@ -591,10 +643,13 @@ function onGazePoint(x, y, locked) {
   //   'blink' (default): he blinks to confirm. No dwell timer runs, so nothing fires while he
   //           just reads the grid. A blink is faster and far less fatiguing than holding a stare.
   //   'dwell': he holds his gaze and a ring fills. For someone who cannot blink deliberately.
-  if (!locked) { dwellStart = performance.now(); return; }
+  //
+  // A tile is only armed when the eye is LOCKED on it. armedTile is what a blink confirms — a
+  // blink while the eye is mid-flight, or resting between tiles, must fire NOTHING.
+  if (!locked) { dwellStart = performance.now(); armedTile = -1; clearArmed(); return; }
 
   if (state.confirmBy === 'blink') {
-    $$('.tile')[i]?.classList.add('armed');   // "blink to say this one"
+    if (armedTile !== i) { clearArmed(); armedTile = i; $$('.tile')[i]?.classList.add('armed'); }
     return;
   }
 
@@ -628,9 +683,19 @@ function commitGazeTile(i) {
       scheduleGazeSave();
     }
   }
+  lastCommitAt = performance.now();
   resetDwell();
   dwellTile = -2;                      // refractory: don't instantly re-fire on the same tile
   bus.emit('SELECT');
+}
+
+// A quick pip so he knows a blink registered — the difference between 'the app didn't see it'
+// and 'it saw it and chose not to act', which otherwise feel identical and are maddening.
+function blinkPip() {
+  const d = $('#gaze-dot');
+  if (!d || d.hidden) return;
+  d.classList.add('pip');
+  setTimeout(() => d.classList.remove('pip'), 160);
 }
 
 // If he undoes within a few seconds of a gaze pick, that selection was probably WRONG — retract
@@ -640,6 +705,7 @@ function retractIfRecent() {
   if (lastLearnId != null && performance.now() - lastLearnAt < 5000) {
     gaze?.retract(lastLearnId);
     lastLearnId = null;
+    scheduleGazeSave();   // the poison may already be on disk (save debounces 4s) — overwrite it
   }
 }
 
@@ -658,26 +724,42 @@ async function startGaze() {
         return;
       }
 
+      blinkPip();   // he can always tell a blink WAS SEEN — "not seen" vs "seen, declined"
+
       // BLINK DRIVER: he selects entirely by blinking, no gaze pointing. Quick blink steps the
       // cursor to the next tile; held blink selects it (single-switch scanning, eyelid as switch).
+      // Blinks are NOT blocked during speech — he must be able to reach and fire URGENT mid-sentence.
       if (state.driver === 'blink') {
-        if (state.speaking && !state.urgent) return;
         if (kind === 'short') moveCursor(1);
         else if (kind === 'long') bus.emit('SELECT');
         return;
       }
 
-      // EYES DRIVER, blink-confirm: he LOOKS at a tile (it arms), then BLINKS to say it. The gaze
-      // does the pointing; the blink is the click. Require a clearly-deliberate blink — a reflex
-      // (~100-150ms) must never speak a word — but he does not have to hold a long stare.
-      if (state.confirmBy === 'blink' && held >= CONFIRM_BLINK_MS && dwellTile >= 0 && !state.speaking) {
-        commitGazeTile(dwellTile);
+      // Just committed — ignore blinks for a beat, so one deliberate blink can't fire twice.
+      if (performance.now() - lastCommitAt < 700) return;
+
+      // A confirming blink on the armed "Say it" / "Urgent" control fires it — so an eyes-only
+      // user can reach every zone, not just the tiles.
+      if (armedControl && held >= CONFIRM_BLINK_MS) {
+        const c = armedControl;
+        lastCommitAt = performance.now();
+        resetDwell();
+        if (c === 'say') compose(); else toggleUrgent();
+        return;
+      }
+
+      // EYES DRIVER, blink-confirm: he LOOKS at a tile (it arms while his eye is LOCKED on it),
+      // then BLINKS to say it. The blink confirms armedTile — never a tile his eye merely passed
+      // over, never one mid-saccade. A reflex (~100-150ms) is below the floor and fires nothing.
+      if (state.confirmBy === 'blink' && held >= CONFIRM_BLINK_MS && armedTile >= 0 && !state.speaking) {
+        const t = armedTile;
+        commitGazeTile(t);
         return;
       }
       // EYES DRIVER, dwell mode: a held blink is a SECOND way to confirm the tile the dwell is
-      // already filling on.
-      if (state.confirmBy === 'dwell' && kind === 'long' && dwellTile >= 0 && !state.speaking) {
-        commitGazeTile(dwellTile);
+      // already filling on (locked → armedTile is set).
+      if (state.confirmBy === 'dwell' && kind === 'long' && armedTile >= 0 && !state.speaking) {
+        commitGazeTile(armedTile);
       }
     },
     onFace: (found) => {
@@ -772,9 +854,12 @@ async function startGaze() {
   if (saved && g.import(saved)) {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — remembered your eyes (${g.terrainSize} samples). Recenter if the dot is off.`;
     toast('Welcome back — your eye calibration was remembered.');
+  } else if (state.driver === 'blink') {
+    $('#gaze-state').textContent = `Camera on (${g.backend}) — blink to select.`;
+    toast('Camera on. Blink to move, hold a blink to pick.');
   } else {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — not calibrated yet.`;
-    toast('Camera on. Calibrate before selecting with your eyes.');
+    toast('Camera on. Calibrate, then look at a word and blink to say it.');
   }
 }
 
@@ -790,6 +875,14 @@ function scheduleGazeSave() {
       if (m) localStorage.setItem(GAZE_KEY, JSON.stringify(m));
     } catch { /* storage full or blocked — the in-memory map still works this session */ }
   }, 4000);
+}
+// Flush any pending gaze save when the page is hidden or closed — the 4s debounce would otherwise
+// lose his most recent learning every time he closes the app.
+window.addEventListener('pagehide', flushGazeSave);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushGazeSave(); });
+function flushGazeSave() {
+  clearTimeout(gazeSaveTimer);
+  try { const m = gaze?.export(); if (m) localStorage.setItem(GAZE_KEY, JSON.stringify(m)); } catch {}
 }
 function loadGazeMap() {
   try { const s = localStorage.getItem(GAZE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
