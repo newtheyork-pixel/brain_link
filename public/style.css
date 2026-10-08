@@ -5,6 +5,9 @@
   --bg: #0F1115; --surface: #191D24; --line: #2A303A;
   --ink: #EDF0F4; --muted: #8C95A3;
   --accent: #5B8DEF; --gold: #E0B354; --danger: #D95A4A;
+  /* The edge of a target. --line was 1.3:1 against a tile, so from 60 cm the eight tiles read as
+     one dark panel with words floating on it. This is 3.2:1 against the tile and 3.6:1 the page. */
+  --edge: #626C7D; --ok: #4CAF7A;
 }
 * { box-sizing: border-box; }
 body {
@@ -59,7 +62,7 @@ button.undo:hover { color: var(--ink); }
 
 .grid { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr);
   grid-template-rows: repeat(2, 1fr); gap: 12px; min-height: 0; }
-.tile { position: relative; background: var(--surface); border: 2px solid var(--line);
+.tile { position: relative; background: var(--surface); border: 2px solid var(--edge);
   border-radius: 16px; color: var(--ink); font-size: clamp(20px, 2.4vw, 30px);
   font-weight: 600; cursor: pointer; padding: 12px 10px;
   transition: transform .06s, border-color .12s; overflow: hidden; }
@@ -81,7 +84,11 @@ body.building main { opacity: .45; }
 .actions { display: flex; gap: 10px; }
 button.primary { flex: 1; background: var(--accent); color: #0B0E13; border: 0;
   border-radius: 14px; padding: 20px; font-size: 21px; font-weight: 700; cursor: pointer; }
-button.primary:disabled { opacity: .3; cursor: default; }
+/* Disabled, but still readable. At opacity .3 the biggest button was a blank blue slab and its
+   label was 1.6:1. Dashed, so it does not look like the plain enabled buttons next to it, and an
+   inset outline, not a border, so the button keeps its size when it enables. */
+button.primary:disabled { background: transparent; color: var(--muted);
+  outline: 2px dashed var(--edge); outline-offset: -2px; cursor: default; }
 button.urgent { background: transparent; color: var(--danger); border: 2px solid var(--danger);
   border-radius: 14px; padding: 20px 26px; font-size: 18px; font-weight: 700; cursor: pointer;
   flex: none; }
@@ -101,7 +108,7 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
 .sheet h2 { margin: 0; font-size: 26px; }
 .sheet-note { margin: 0; color: var(--muted); font-size: 15px; }
 .candidates { display: flex; flex-direction: column; gap: 12px; width: min(720px, 100%); }
-.candidate { background: var(--surface); border: 2px solid var(--line); border-radius: 14px;
+.candidate { background: var(--surface); border: 2px solid var(--edge); border-radius: 14px;
   color: var(--ink); font-size: 25px; line-height: 1.35; padding: 24px; text-align: left;
   cursor: pointer; }
 .candidate:hover { border-color: var(--gold); }
@@ -157,6 +164,9 @@ body.settings-open .composing { padding-right: min(400px, 100%); }
   padding: 12px 20px; font-size: 15px; font-weight: 650; z-index: 40;
   max-width: 90vw; text-align: center; }
 .toast[hidden] { display: none; }
+/* Red is kept for things that went wrong. A success in red taught the room to ignore red. */
+.toast.ok { background: var(--ok); }
+.toast.info { background: var(--surface); color: var(--ink); border: 1px solid var(--edge); }
 /* the mic is actually hearing someone right now */
 button.listen.hearing { background: rgba(91,141,239,.22); }
 
@@ -182,8 +192,11 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
 /* The dwell ring: he can SEE the tile filling up, so a selection is never a surprise and he
    always has time to look away. --dwell is 0..1, set per frame from the gaze loop. */
 .tile::before { content: ""; position: absolute; inset: 0; border-radius: 14px;
-  background: linear-gradient(to top, rgba(91,141,239,.28) 0%,
-              rgba(91,141,239,.28) calc(var(--dwell, 0) * 100%),
+  /* A solid bar along the bottom as well as the wash: a tint alone was 1.5:1 and the progress
+     could not be seen from his pillow. The bar is 5:1. */
+  background: linear-gradient(var(--accent), var(--accent)) left bottom / calc(var(--dwell, 0) * 100%) 6px no-repeat,
+    linear-gradient(to top, rgba(91,141,239,.35) 0%,
+              rgba(91,141,239,.35) calc(var(--dwell, 0) * 100%),
               transparent calc(var(--dwell, 0) * 100%));
   pointer-events: none; }
 
@@ -257,6 +270,13 @@ body.gaze-mode button.listen { padding: 7px 14px; font-size: 13px; }
 body.gaze-mode .composing { padding: 8px 12px; }
 body.gaze-mode .composing strong { font-size: 20px; }
 body.gaze-mode .grid { gap: 8px; }
+/* Nothing floats over a gaze target. The help line, what he just said and the toasts sat over the
+   bottom tiles and Say it, and a caption he was reading could arm the word under it. In camera
+   modes they go to the top band, over the partner row, which his eyes never select. */
+body.gaze-mode .scan-help, body.gaze-mode .spoken, body.gaze-mode .toast { top: 6px; bottom: auto; }
+body.gaze-mode .spoken { padding: 8px 22px; font-size: 20px; }
+/* Room on the right for the eye status chip and the gear, which used to cover Listen. */
+body.gaze-mode .hear-row { padding-right: 236px; }
 /* THE ACTION ROW IS A GAZE TARGET TOO, at the screen's bottom edge where the eye is least
    accurate. At 48px tall it was far inside the measured error, so Say it and Urgent could not be
    held. It now takes a fixed share of the height (the tiles keep the rest), and the gaze hit-test
@@ -267,14 +287,24 @@ body.gaze-mode .actions > button { flex: 1 1 0; min-width: 0; padding: 8px 10px;
   white-space: normal; line-height: 1.2; position: relative; overflow: hidden; }
 body.gaze-mode #compose { flex-grow: 1.5; }
 body.gaze-mode #urgent { flex: 0 0 22%; }
-body.gaze-mode .actions > button:disabled { opacity: .3; cursor: default; }
+body.gaze-mode .actions > button:disabled:not(.primary) { opacity: .45; cursor: default; }
 .actions > button[hidden] { display: none; }
-/* armed by his gaze, or the scan cursor resting on it: the same gold as a tile */
-.actions > button.armed, .actions > button.cursor { border: 2px solid var(--gold);
+/* The scan or Blinks cursor resting on it: the same gold edge as a tile cursor. */
+.actions > button.cursor { border: 2px solid var(--gold);
   box-shadow: 0 0 0 3px rgba(224,179,84,.35); }
+/* ARMED by his gaze: a blink now fires it. It has to look different from the cursor at 60 cm, so a
+   thick solid ring and, in look-then-blink, the same words as an armed tile. */
+.actions > button.armed { border: 2px solid var(--gold);
+  box-shadow: 0 0 0 5px var(--gold), 0 0 22px 6px rgba(224,179,84,.35); }
+body.look-blink .actions > button.armed::after { content: "close eyes till the beep";
+  position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; font-size: 14px;
+  font-weight: 700; line-height: 1.2; color: var(--gold); pointer-events: none; }
+/* gold on the blue Say it, or on the red Urgent grid button, is unreadable: use their own dark ink */
+body.look-blink #compose.armed::after, body.in-urgent.look-blink #urgent.armed::after { color: #0B0E13; }
 /* the dwell ring on a button, same language as the tiles */
 body.gaze-mode .actions > button::before { content: ""; position: absolute; inset: 0;
-  background: linear-gradient(to top, rgba(224,179,84,.35) 0%,
+  background: linear-gradient(var(--gold), var(--gold)) left bottom / calc(var(--dwell, 0) * 100%) 6px no-repeat,
+    linear-gradient(to top, rgba(224,179,84,.35) 0%,
               rgba(224,179,84,.35) calc(var(--dwell, 0) * 100%),
               transparent calc(var(--dwell, 0) * 100%));
   pointer-events: none; }
@@ -289,6 +319,22 @@ body.gaze-mode .gear-float { display: flex; }
   width: 40px; height: 40px; align-items: center; justify-content: center;
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
   color: var(--muted); font-size: 17px; cursor: pointer; }
+/* Is the camera seeing him, and how long have his eyes been shut? With the header gone nothing said
+   the camera was on, and in Blinks mode a lost face changed nothing on screen. When a blink "did
+   nothing", this is how he or the caregiver tells "no face" from "not long enough": the bar fills
+   while his eyes are shut and turns gold at his Blink length, the moment of the beep. */
+.eye-status { display: none; position: fixed; top: 10px; right: 58px; z-index: 6; width: 170px;
+  height: 40px; align-items: center; gap: 8px; padding: 0 12px; background: var(--surface);
+  border: 1px solid var(--edge); border-radius: 10px; color: var(--ink); font-size: 14px;
+  font-weight: 650; pointer-events: none; }
+body.gaze-mode .eye-status { display: flex; }
+.eye-status .face { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--ok); }
+.eye-status.lost { border-color: var(--danger); color: var(--danger); }
+.eye-status.lost .face { background: var(--danger); }
+.eye-status .shut { flex: 1; height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.eye-status .shut span { display: block; height: 100%; width: 0; background: var(--accent); }
+.eye-status .shut span.long { background: var(--gold); }
+.eye-status.pip-ok { border-color: var(--gold); box-shadow: 0 0 0 4px rgba(224,179,84,.55); }
 
 /* Numbered sentence options — pickable by touch, by gaze dwell, or by blink. */
 .candidate { position: relative; display: flex; align-items: center; gap: 16px; overflow: hidden; }
@@ -298,21 +344,35 @@ body.gaze-mode .gear-float { display: flex; }
 .candidate .say { flex: 1; }
 /* the gaze dwell filling this option — same language as the tiles */
 .candidate::before { content: ""; position: absolute; inset: 0; border-radius: 14px;
-  background: rgba(91,141,239,.20);
+  background: linear-gradient(var(--accent), var(--accent)) left bottom / 100% 6px no-repeat,
+    rgba(91,141,239,.30);
   transform: scaleX(var(--dwell, 0)); transform-origin: left; pointer-events: none;
   transition: transform .05s linear; }
 .candidate.cursor { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(224,179,84,.28); }
 .candidate.cursor .num { background: rgba(224,179,84,.22); color: var(--gold); }
 /* a hint of how to drive it, shown only in gaze mode */
-.sheet-hint { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+/* It tells him the gesture, so it has to be readable from his pillow: ink, not muted, not 14px. */
+.sheet-hint { color: var(--ink); font-size: 20px; margin: 4px 0 0; text-align: center; }
 .sheet-hint[hidden] { display: none; }
 
-/* Eyes mode, look-then-blink: the tile he is looking at is ARMED — a clear "blink to say this". */
-.tile.armed { border-color: var(--gold); background: rgba(224,179,84,.14);
-  box-shadow: 0 0 0 3px rgba(224,179,84,.35); }
-.tile.armed::after { content: "close eyes till the beep"; position: absolute; bottom: 8px; left: 0; right: 0;
-  text-align: center; font-size: 12px; font-weight: 650; color: var(--gold);
-  letter-spacing: .04em; text-transform: uppercase; opacity: .85; }
+/* Eyes mode, look-then-blink: the tile he is looking at is ARMED, a clear "a blink says this now".
+   It used to differ from the plain cursor by 2% more fill and a 12px label, so he blinked on a gold
+   word that was not armed yet and nothing happened. Now armed is the only gold thing: a thick ring,
+   a real wash, a label he can read from 60 cm, and a flare when it arms (seen from the eye's corner
+   and on video). The cursor that only follows his eye is a thin blue edge (body.look-blink below). */
+.tile.armed { border-color: var(--gold); background: rgba(224,179,84,.24);
+  box-shadow: inset 0 0 0 2px var(--gold), 0 0 0 5px rgba(224,179,84,.55);
+  animation: armed-in .3s ease-out; }
+@keyframes armed-in { from { box-shadow: inset 0 0 0 2px var(--gold), 0 0 0 16px rgba(224,179,84,.7); } }
+.tile.armed::after { content: "close eyes till the beep"; position: absolute; bottom: 10px; left: 0; right: 0;
+  text-align: center; font-size: clamp(15px, 1.4vw, 20px); font-weight: 700; color: var(--gold);
+  line-height: 1.2; padding: 0 6px;
+  /* A pinned tile's ::after is a 5px faded dot at the top. Undo that here, or the label is
+     squeezed into it ("yes" and "no" are pinned, and they are the most used words). */
+  top: auto; width: auto; height: auto; background: none; border-radius: 0; opacity: 1; }
+body.look-blink .tile.cursor:not(.armed) { border-color: var(--accent); background: var(--surface);
+  box-shadow: none; }
+@media (prefers-reduced-motion: reduce) { .tile.armed { animation: none; } }
 /* Blink feedback. `scale`, not `transform`: the dot's inline translate would override a transform
    and the pip would never show. Gold = it acted; grey = seen, did nothing. */
 .gaze-dot.pip-ok { scale: 1.9; background: var(--gold); border-color: var(--gold);
@@ -328,5 +388,6 @@ body.gaze-mode .gear-float { display: flex; }
 /* seen, but did nothing (Blinks mode has no dot, so the cursor carries it) */
 .pip-no:not(.gaze-dot) { box-shadow: 0 0 0 4px rgba(150,160,175,.55); }
 /* nearly long enough: say so on the word itself */
-.tile.armed.too-short::after { content: "longer: till the beep"; color: var(--danger); opacity: 1; }
+/* A lighter red than --danger: on the gold wash of an armed tile --danger was 2.6:1. */
+.tile.armed.too-short::after { content: "longer: till the beep"; color: #F08A7C; opacity: 1; }
 .candidate.too-short, .actions > button.too-short { box-shadow: 0 0 0 4px rgba(217,90,74,.55); }

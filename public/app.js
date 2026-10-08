@@ -1016,6 +1016,9 @@ function flash(el, cls, ms) {
 function blinkFeedback(result, el = null, held = 0) {
   const d = $('#gaze-dot');
   const dot = d && !d.hidden ? d : null;
+  // The status chip is never hidden in camera modes, so every blink the app heard shows there too,
+  // even in Blinks mode (no dot) and on a blink that had nothing to act on.
+  flash($('#eye-status'), result === 'fired' || result === 'seen' ? 'pip-ok' : 'pip-no', 350);
   if (result === 'fired' || result === 'seen') {
     flash(dot, 'pip-ok', 350);
     if (result === 'fired') flash(el, 'fired', 450);
@@ -1023,6 +1026,32 @@ function blinkFeedback(result, el = null, held = 0) {
   }
   flash(dot ?? el, 'pip-no', 350);
   if (el && held >= state.blinkMs * 0.75 && held < state.blinkMs) flash(el, 'too-short', 1200);
+}
+
+// THE EYE STATUS CHIP (camera modes). faceSeen: null until the camera's first frame, then whether
+// it can see his face. The bar fills while his eyes are shut and turns gold at his Blink length,
+// and holds where it got to for a moment after he opens them, so "not long enough" can be read.
+let faceSeen = null;
+let shutSince = 0, shutClearTimer = null;
+function renderEyeStatus() {
+  const el = $('#eye-status');
+  el.classList.toggle('lost', faceSeen === false);
+  $('#eye-status-text').textContent = faceSeen === null ? 'Starting'
+    : !faceSeen ? 'No face' : state.driver === 'blink' ? 'Blinks' : 'Eyes';
+}
+function showLids(shut) {
+  const bar = $('#eye-shut');
+  if (!shut) {
+    if (!shutSince) return;
+    shutSince = 0;
+    clearTimeout(shutClearTimer);
+    shutClearTimer = setTimeout(() => { bar.style.width = '0%'; bar.classList.remove('long'); }, 700);
+    return;
+  }
+  if (!shutSince) { shutSince = performance.now(); clearTimeout(shutClearTimer); }
+  const frac = Math.min(1, (performance.now() - shutSince) / state.blinkMs);
+  bar.style.width = `${frac * 100}%`;
+  bar.classList.toggle('long', frac >= 1);
 }
 
 // If he undoes within a few seconds of a gaze pick, that selection was probably WRONG — retract
@@ -1038,6 +1067,7 @@ function retractIfRecent() {
 
 async function startGaze() {
   if (gaze) return;
+  faceSeen = null; showLids(false); renderEyeStatus();   // "Starting" until the first camera frame
   const g = createGaze({
     onGaze: onGazePoint,
     confirmMs: state.blinkMs,
@@ -1129,13 +1159,16 @@ async function startGaze() {
       }
       blinkFeedback('ignored', el, held);
     },
+    onLids: showLids,
     onFace: (found) => {
       $('#gaze-dot').classList.toggle('lost', !found);
+      if (found !== faceSeen) { faceSeen = found; renderEyeStatus(); }
+      if (!found) showLids(false);
       if (!found) { resetDwell(); blinkTarget = null; }
     },
     // Only a fatal error stops tracking (gaze.js recovers from stalls and dropouts by itself).
     onError: (msg, { fatal = true } = {}) => { toast(msg); if (fatal && gaze === g) gazeStopped(); },
-    onRecovered: () => toast('Camera back. Eye tracking is on again.'),
+    onRecovered: () => toast('Camera back. Eye tracking is on again.', 'ok'),
     onCalibrationProgress: (p) => {
       if (p.state === 'done') {
         $('#calib').hidden = true;
@@ -1165,7 +1198,7 @@ async function startGaze() {
           : okX ? `Left and right is good, but up and down is too loose. Keep your head level and try again.`
           : `Up and down is good, but left and right is too loose. Try again.`;
         const msg = p.kept ? `${loose} Your previous calibration is still in use.` : loose;
-        toast(msg);
+        toast(msg, okX && okY ? 'ok' : 'error');
         speakPrompt(msg);
         return;
       }
@@ -1219,18 +1252,18 @@ async function startGaze() {
   const saved = loadGazeMap();
   if (saved && g.import(saved)) {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — remembered your eyes (${g.terrainSize} samples). Recenter if the dot is off.`;
-    toast('Welcome back — your eye calibration was remembered.');
+    toast('Welcome back — your eye calibration was remembered.', 'ok');
   } else if (saved && g.importProblem === 'camera' && state.driver !== 'blink') {
     // Not loaded, and not deleted: until he calibrates this camera, plugging the old one back in
     // brings its map back.
     $('#gaze-state').textContent = `Camera on (${g.backend}). Different camera from last time: not calibrated yet.`;
-    toast('This is a different camera from last time. Calibrate once for it.');
+    toast('This is a different camera from last time. Calibrate once for it.', 'info');
   } else if (state.driver === 'blink') {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — blink to select.`;
-    toast('Camera on. Blink to move. Close your eyes until the beep to pick.');
+    toast('Camera on. Blink to move. Close your eyes until the beep to pick.', 'info');
   } else {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — not calibrated yet.`;
-    toast('Camera on. Calibrate, then look at a word and close your eyes until the beep to say it.');
+    toast('Camera on. Calibrate, then look at a word and close your eyes until the beep to say it.', 'info');
   }
 }
 
@@ -1367,7 +1400,7 @@ async function runSignalCheck(g, live) {
     : snr > 4
       ? `Signal is ${verdict}. Now calibrate.`
       : `${snrY < snrX ? 'Up and down' : 'Left and right'} is too noisy. Sit closer, put more light on your face, and raise the camera to eye level.`;
-  toast(`${snr.toFixed(1)}x: ${verdictMsg}`);
+  toast(`${snr.toFixed(1)}x: ${verdictMsg}`, snr > 4 && !(p.irisPx && p.irisPx < 12) ? 'ok' : 'error');
   speakPrompt(verdictMsg);   // he does not have to read it either
 
   fetch('/api/gazelog', {
@@ -1483,7 +1516,8 @@ async function testGazeAccuracy() {
     gazeTesting = true;
     await runGazeAccuracy(g, live);
   } catch (e) {
-    toast(String(e.message) === 'cancelled' ? 'Test stopped.' : `Test failed: ${e.message}`);
+    const stopped = String(e.message) === 'cancelled';
+    toast(stopped ? 'Test stopped.' : `Test failed: ${e.message}`, stopped ? 'info' : 'error');
   } finally {
     // No throw may leave selection switched off, or the overlay up.
     gazeTesting = false;
@@ -1568,7 +1602,7 @@ async function runGazeAccuracy(g, live) {
   const hits = results.filter((r) => r.hit).length;
   const pct = Math.round((hits / results.length) * 100);
   const msg = `Hit ${hits} of ${results.length}. After bias correction: ${hitsDebiased} of ${withPos.length}.`;
-  toast(msg);
+  toast(msg, 'info');
   speakPrompt(msg);
   $('#gaze-state').textContent =
     `Accuracy ${hits}/${results.length} raw · ${hitsDebiased}/${withPos.length} debiased · bias (${Math.round(bdx)}, ${Math.round(bdy)})px`;
@@ -1611,9 +1645,13 @@ function gazeStopped() {
 /* ---------- feedback ---------- */
 
 let toastTimer = null;
-function toast(msg) {
+// kind: 'error' (red, the default: never fail quietly), 'ok' (green, it worked), 'info' (neutral).
+// A success in red taught the room that red means nothing, so the real failures stopped standing out.
+function toast(msg, kind = 'error') {
   const el = $('#toast');
   el.textContent = msg;
+  el.className = `toast ${kind}`;
+  el.setAttribute('role', kind === 'error' ? 'alert' : 'status');
   el.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.hidden = true; }, 6000);
@@ -1732,6 +1770,10 @@ $('#driver').onchange = (e) => {
 /** Show only the settings that do something for the current input. */
 function syncSettingsRows() {
   const eyes = state.driver === 'gaze';
+  // Look-then-blink: the plain cursor turns into a thin blue edge, so gold means only "armed, a
+  // blink says it now" (style.css). Other drivers keep the gold cursor: there it IS the selection.
+  document.body.classList.toggle('look-blink', eyes && state.confirmBy === 'blink');
+  renderEyeStatus();
   $('#confirm-row').hidden = !eyes;   // look-then-blink vs dwell is an Eyes-mode choice
   // The dwell slider only drives Eyes mode with Confirm by Dwell. Shown anywhere else it promised a
   // hold that never happened.
@@ -1820,7 +1862,7 @@ function endCalibrationUI() {
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   overlayGen++;
-  if (gaze?.calibrating) { gaze.cancelCalibration(); toast('Calibration stopped.'); }
+  if (gaze?.calibrating) { gaze.cancelCalibration(); toast('Calibration stopped.', 'info'); }
   else if (!$('#calib').hidden) endCalibrationUI();
 });
 $('#test-gaze').onclick = testGazeAccuracy;
@@ -1849,7 +1891,7 @@ $('#recenter').onclick = async () => {
     live();
     if (r) scheduleGazeSave();   // the new offset is worth keeping now, not at the next pick
     toast(r ? `Recentered (${r.dx > 0 ? '+' : ''}${r.dx}, ${r.dy > 0 ? '+' : ''}${r.dy} px).`
-            : 'Could not see your eyes well enough. The old setting is kept.');
+            : 'Could not see your eyes well enough. The old setting is kept.', r ? 'ok' : 'error');
   } catch (e) {
     if (String(e.message) !== 'cancelled') toast(`Recenter stopped: ${e.message}`);
   } finally {

@@ -147,6 +147,10 @@
 
 <!-- gaze mode hides the header to buy tile height; the gear keeps a way back in -->
 <button id="gear-float" class="gear-float" aria-label="Settings">⚙</button>
+<!-- camera modes: face seen or not, which input is on, and a bar that fills while his eyes are shut -->
+<div id="eye-status" class="eye-status" aria-hidden="true">
+  <i class="face"></i><span id="eye-status-text">Eyes</span><span class="shut"><span id="eye-shut"></span></span>
+</div>
 
 <script type="module" src="/app.js"></script>
 </body>

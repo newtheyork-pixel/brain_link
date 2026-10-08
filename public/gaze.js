@@ -161,7 +161,7 @@ async function openCamera() {
 
 // onError(msg, { fatal }): fatal means eye tracking has stopped and needs a person (camera blocked,
 // no camera, model would not load). Anything else is a message; tracking carries on or recovers.
-export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace, onError,
+export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids, onFace, onError,
   onRecovered, onCalibrationProgress, confirmMs = BLINK_DEFAULTS.confirmMs }) {
   let landmarker = null, video = null, stream = null, backend = '?';
   let camera = null, irisPx = 0;
@@ -435,6 +435,9 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     // The lids, both eyes, against his own open level (blinkgate.js). The snapshot is taken BEFORE
     // onLidsClosing, so the app reads the point from before the lids moved.
     const g = gate.step(lastFrameAt, f.L, f.R);
+    // Every frame, shut or not, so the app can show how long his eyes have been closed. A blink
+    // that "did nothing" is then visibly "not long enough", not a mystery.
+    onLids?.(gate.shut);
     // A blink frame carries no gaze. One in the signal check's "hold still" window used to turn a
     // good camera into "too noisy".
     lastRaw = g.gated || fRaw.lid > BLINK_ON ? null : { v: fRaw.v, seq: ++rawSeq };
