@@ -139,6 +139,8 @@ export function makeBlinkGate(opts = {}) {
     step,
     get gated() { return gated; },
     get shut() { return shut; },
+    /** When the current shut began, on the frame clock step() was given. */
+    get shutAt() { return shutAt; },
     get confirmMs() { return o.confirmMs; },
     set confirmMs(ms) { o.confirmMs = ms; },
     /** Face lost: forget the blink in progress and his open level; both are stale now. */

@@ -270,11 +270,23 @@ body.gaze-mode button.listen { padding: 7px 14px; font-size: 13px; }
 body.gaze-mode .composing { padding: 8px 12px; }
 body.gaze-mode .composing strong { font-size: 20px; }
 body.gaze-mode .grid { gap: 8px; }
-/* Nothing floats over a gaze target. The help line, what he just said and the toasts sat over the
-   bottom tiles and Say it, and a caption he was reading could arm the word under it. In camera
-   modes they go to the top band, over the partner row, which his eyes never select. */
-body.gaze-mode .scan-help, body.gaze-mode .spoken, body.gaze-mode .toast { top: 6px; bottom: auto; }
+/* Nothing floats over a gaze target. What he just said and the toasts sat over the bottom tiles and
+   Say it, and a caption he was reading could arm the word under it. In camera modes they go to the
+   top band, over the partner row, which his eyes never select. They only show for a few seconds and
+   let clicks through, so Listen and the partner box stay usable under them. */
+/* Centered on the partner band, not the screen, and no wider than it, so they end before the eye
+   status chip and the gear on the right. */
+body.gaze-mode .spoken, body.gaze-mode .toast { top: 6px; bottom: auto; pointer-events: none;
+  left: calc(50% - 118px); max-width: calc(100vw - 256px); }
 body.gaze-mode .spoken { padding: 8px 22px; font-size: 20px; }
+/* Both at once: the toast goes under the caption, so a "voice failed" note does not hide what he
+   said. Brief, and only while the caption is up. */
+body.gaze-mode .spoken:not([hidden]) ~ .toast { top: 60px; }
+/* The Blinks help line is up the whole time, so it cannot sit over the partner's question (he could
+   not read the end of what he was answering) or over the tiles. It gets its own row at the bottom,
+   in the page flow, where it covers nothing. */
+body.gaze-mode #blink-help { position: static; transform: none; align-self: center; flex: none;
+  max-width: 100%; white-space: normal; text-align: center; padding: 6px 14px; }
 /* Room on the right for the eye status chip and the gear, which used to cover Listen. */
 body.gaze-mode .hear-row { padding-right: 236px; }
 /* THE ACTION ROW IS A GAZE TARGET TOO, at the screen's bottom edge where the eye is least
@@ -323,7 +335,8 @@ body.gaze-mode .gear-float { display: flex; }
    the camera was on, and in Blinks mode a lost face changed nothing on screen. When a blink "did
    nothing", this is how he or the caregiver tells "no face" from "not long enough": the bar fills
    while his eyes are shut and turns gold at his Blink length, the moment of the beep. */
-.eye-status { display: none; position: fixed; top: 10px; right: 58px; z-index: 6; width: 170px;
+/* z 21: above the sentence sheet (z 20), where blink-confirm is used too. It lets clicks through. */
+.eye-status { display: none; position: fixed; top: 10px; right: 58px; z-index: 21; width: 170px;
   height: 40px; align-items: center; gap: 8px; padding: 0 12px; background: var(--surface);
   border: 1px solid var(--edge); border-radius: 10px; color: var(--ink); font-size: 14px;
   font-weight: 650; pointer-events: none; }
@@ -370,8 +383,13 @@ body.gaze-mode .eye-status { display: flex; }
   /* A pinned tile's ::after is a 5px faded dot at the top. Undo that here, or the label is
      squeezed into it ("yes" and "no" are pinned, and they are the most used words). */
   top: auto; width: auto; height: auto; background: none; border-radius: 0; opacity: 1; }
-body.look-blink .tile.cursor:not(.armed) { border-color: var(--accent); background: var(--surface);
-  box-shadow: none; }
+/* Not on a tile that is filling or just fired: this selector outranks .tile.ready and .tile.fired,
+   and the fired word (dark ink) went nearly invisible on the dark surface instead of flashing gold.
+   An urgent tile keeps its red tint under the blue edge. */
+body.look-blink .tile.cursor:not(.armed):not(.fired):not(.ready) { border-color: var(--accent);
+  background: var(--surface); box-shadow: none; }
+body.look-blink .tile.urgent-tile.cursor:not(.armed):not(.fired):not(.ready) {
+  background: rgba(217,90,74,.10); }
 @media (prefers-reduced-motion: reduce) { .tile.armed { animation: none; } }
 /* Blink feedback. `scale`, not `transform`: the dot's inline translate would override a transform
    and the pip would never show. Gold = it acted; grey = seen, did nothing. */

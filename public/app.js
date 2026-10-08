@@ -1039,7 +1039,7 @@ function renderEyeStatus() {
   $('#eye-status-text').textContent = faceSeen === null ? 'Starting'
     : !faceSeen ? 'No face' : state.driver === 'blink' ? 'Blinks' : 'Eyes';
 }
-function showLids(shut) {
+function showLids(shut, heldMs) {
   const bar = $('#eye-shut');
   if (!shut) {
     if (!shutSince) return;
@@ -1049,7 +1049,9 @@ function showLids(shut) {
     return;
   }
   if (!shutSince) { shutSince = performance.now(); clearTimeout(shutClearTimer); }
-  const frac = Math.min(1, (performance.now() - shutSince) / state.blinkMs);
+  // gaze.js passes how long the gate has seen them shut, the clock the beep uses. Fall back to ours.
+  const ms = heldMs ?? performance.now() - shutSince;
+  const frac = Math.min(1, ms / state.blinkMs);
   bar.style.width = `${frac * 100}%`;
   bar.classList.toggle('long', frac >= 1);
 }

@@ -436,8 +436,9 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
     // onLidsClosing, so the app reads the point from before the lids moved.
     const g = gate.step(lastFrameAt, f.L, f.R);
     // Every frame, shut or not, so the app can show how long his eyes have been closed. A blink
-    // that "did nothing" is then visibly "not long enough", not a mystery.
-    onLids?.(gate.shut);
+    // that "did nothing" is then visibly "not long enough", not a mystery. The time shut is on the
+    // same frame clock as the 'held' event and its beep, so the bar turns gold on the beep's frame.
+    onLids?.(gate.shut, gate.shut ? lastFrameAt - gate.shutAt : 0);
     // A blink frame carries no gaze. One in the signal check's "hold still" window used to turn a
     // good camera into "too noisy".
     lastRaw = g.gated || fRaw.lid > BLINK_ON ? null : { v: fRaw.v, seq: ++rawSeq };
