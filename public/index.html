@@ -42,22 +42,28 @@
 <main id="grid" class="grid" role="group" aria-label="Word tiles"></main>
 
 <section class="actions">
+  <!-- Eyes, blinks and switch only: the header tabs and the small Undo are touch-sized, and the
+       header is hidden in camera modes. Without these a misfire could never be taken back. -->
+  <button id="mode-eye" class="ghost eyes-extra" data-ctrl="mode" hidden>Mode: Answer</button>
+  <button id="undo-eye" class="ghost eyes-extra" data-ctrl="undo" hidden disabled>Undo</button>
   <!-- He cannot raise a hand or clear his throat. Without this he can never ENTER a
        conversation — only ever answer one somebody else started. -->
-  <button id="hold" class="hold">Wait — I'm talking</button>
-  <button id="compose" class="primary" disabled>Say it</button>
+  <button id="hold" class="hold" data-ctrl="hold">Wait — I'm talking</button>
+  <button id="compose" class="primary" data-ctrl="say" disabled>Say it</button>
   <!-- Always reachable. If the grid is about Emma's graduation and he can't breathe,
        a predicted grid would trap him. No amount of tile quality fixes that. -->
-  <button id="urgent" class="urgent">Urgent</button>
+  <button id="urgent" class="urgent" data-ctrl="urgent">Urgent</button>
 </section>
 
 <!-- Nothing is ever spoken without him choosing it. -->
 <div id="confirm" class="sheet" hidden>
   <h2>Say which one?</h2>
   <p class="sheet-note">Nothing is spoken until you pick.</p>
-  <p id="sheet-hint" class="sheet-hint" hidden>Look and hold to say it &middot; or blink to move, hold your eyes shut to say it.</p>
+  <p id="sheet-hint" class="sheet-hint" hidden>Look at one, then close your eyes until the beep to say it.</p>
   <div id="candidates" class="candidates"></div>
   <button id="cancel" class="ghost">Back</button>
+  <!-- The sheet covers the whole screen, so Urgent has to be on it too. -->
+  <button id="sheet-urgent" class="urgent">Urgent</button>
 </div>
 
 <!-- Caregiver + researcher controls. Out of his way. -->
@@ -85,18 +91,23 @@
     <button id="signal-check" class="ghost">1. Signal</button>
     <button id="calibrate" class="ghost">2. Calibrate</button>
     <button id="test-gaze" class="ghost">3. Test</button>
+    <button id="checkin" class="ghost">Quick check</button>
     <button id="recenter" class="ghost">Recenter</button>
   </div>
   <label class="row" id="confirm-row" hidden>
     <span><b>Confirm by</b><em>How he says the word he is looking at.</em></span>
     <select id="confirm-by">
-      <option value="blink">Blink (look, then blink)</option>
+      <option value="blink">Blink (look, then close eyes until the beep)</option>
       <option value="dwell">Dwell (look and hold)</option>
     </select>
   </label>
-  <label class="row">
+  <label class="row" id="dwell-row" hidden>
     <span><b>Dwell time</b><em id="dwell-label">Hold a tile for 0.9s to pick it.</em></span>
     <input type="range" id="dwell" min="400" max="2500" step="100" value="900">
+  </label>
+  <label class="row" id="blink-row" hidden>
+    <span><b>Blink length</b><em id="blink-label">Close your eyes for 0.35s (until the beep) to say a word.</em></span>
+    <input type="range" id="blink-ms" min="300" max="1200" step="50" value="400">
   </label>
   <p class="who"><span id="who-name">—</span> · <span id="voice-state">placeholder voice</span></p>
   <p class="hud"><b id="m-sel">0</b> selections · <b id="m-time">0.0</b>s · <span id="m-src"></span></p>
@@ -111,6 +122,9 @@
      just sat there. Never fail quietly at a bedside. -->
 <div id="toast" class="toast" hidden role="status"></div>
 
+<!-- Accuracy test progress. The test runs on the live grid, so this sits over it, not in #calib. -->
+<p id="test-chip" class="test-chip" hidden role="status"></p>
+
 <!-- Where he is looking. Coarse on purpose: webcam gaze is good to a few degrees, not a few
      pixels, so we never ask it to hit a small target. Eight big tiles, and a dwell to confirm. -->
 <div id="gaze-dot" class="gaze-dot" hidden></div>
@@ -124,7 +138,7 @@
 </div>
 
 <div id="blink-help" class="scan-help" hidden>
-  Blink to move to the next word &middot; hold your eyes shut to pick it
+  Blink firmly to move (Urgent comes first) &middot; close your eyes until the beep to pick it
 </div>
 
 <div id="scan-help" class="scan-help" hidden>
@@ -134,6 +148,10 @@
 
 <!-- gaze mode hides the header to buy tile height; the gear keeps a way back in -->
 <button id="gear-float" class="gear-float" aria-label="Settings">⚙</button>
+<!-- camera modes: face seen or not, which input is on, and a bar that fills while his eyes are shut -->
+<div id="eye-status" class="eye-status" aria-hidden="true">
+  <i class="face"></i><span id="eye-status-text">Eyes</span><span class="shut"><span id="eye-shut"></span></span>
+</div>
 
 <script type="module" src="/app.js"></script>
 </body>

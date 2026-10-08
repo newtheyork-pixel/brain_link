@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eye Recording</title>
+<style>
+  :root { --bg: #000; --fg: #eee; --dim: #888; --dot: #ff5a36; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 20px/1.5 -apple-system, system-ui, sans-serif; overflow: hidden; cursor: none; }
+  #msg { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; text-align: center; padding: 16px; gap: 12px; cursor: default; }
+  #msg small { color: var(--dim); }
+  #msg button { font: inherit; padding: 10px 28px; border-radius: 999px; border: 0;
+    background: var(--fg); color: var(--bg); cursor: pointer; }
+  #dot { position: fixed; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%;
+    background: var(--dot); display: none; }
+  #dot::after { content: ''; position: absolute; left: 13px; top: 13px; width: 8px; height: 8px;
+    border-radius: 50%; background: #000; }
+  #dot.shrink { animation: shrink 1.6s ease-in forwards; }
+  @keyframes shrink { from { transform: scale(1.6); } to { transform: scale(0.6); } }
+  #bar { position: fixed; left: 0; bottom: 0; height: 3px; background: #333; width: 0; }
+  #status { position: fixed; right: 12px; top: 8px; font-size: 13px; color: #444; }
+</style>
+</head>
+<body>
+<div id="msg">
+  <strong>Eye recording, about 4 minutes</strong>
+  <div>Sit the way you normally use the app. Good light on your face, laptop at its usual distance.</div>
+  <small>Look straight at the black centre of each dot until it moves. Blinking is fine.<br>
+  Escape stops at any time; whatever was recorded is kept.</small>
+  <button id="go">Start camera</button>
+</div>
+<div id="dot"></div>
+<div id="bar"></div>
+<div id="status"></div>
+<script type="module" src="/record.js"></script>
+</body>
+</html>
