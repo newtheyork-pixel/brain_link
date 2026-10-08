@@ -20,6 +20,10 @@ let profile;
 try { profile = JSON.parse(await readFile(path.join(ROOT, 'data', 'profile.json'), 'utf8')); }
 catch { profile = JSON.parse(await readFile(path.join(ROOT, 'data', 'profile.example.json'), 'utf8')); }
 const OPENERS = profile.openers;
+// yes/no are answers. On an Ask or Tell grid they are two of his eight slots spent on words he
+// can never use, so every list that fills those grids (static, padding, fallback) leaves them out.
+const YESNO = [clusterOf('yes'), clusterOf('no')];
+const openersFor = (mode) => (mode === 'answer' ? OPENERS : OPENERS.filter((t) => !YESNO.includes(clusterOf(t))));
 
 // .mjs and .wasm matter: a module served as text/plain is REFUSED by the browser, and the whole
 // import chain dies with "failed to fetch dynamically imported module" — which points at the
@@ -128,7 +132,7 @@ const routes = {
     const slots = replying ? coreSlots : 0;
     const core = replying ? (profile.core ?? []) : [];
 
-    if (!predictive && !partner) return json(res, 200, { tiles: OPENERS, source: 'static' });
+    if (!predictive && !partner) return json(res, 200, { tiles: openersFor(mode), source: 'static' });
     if (!selected.length && !partner && mode === 'answer') {
       return json(res, 200, { tiles: OPENERS, source: 'openers' });
     }
@@ -145,18 +149,17 @@ const routes = {
       // ASK grid is one of his eight slots spent on a word he can never use.
       // AFTER buildGrid, because echo-stripping can mint "okay" out of a longer tile — and via
       // the synonym clusters, not a hand-rolled regex that had already drifted from them.
-      const YESNO = [clusterOf('yes'), clusterOf('no')];
       if (mode !== 'answer') tiles = tiles.filter((t) => !YESNO.includes(clusterOf(t)));
 
       // Never hand him an empty board. Echo-strip + dedupe can eat a whole grid, and a missing
       // tile is a thing he cannot say.
       if (tiles.length < 5) {
-        tiles = [...tiles, ...dedupe(OPENERS, [...tiles, ...selected])].slice(0, 8);
+        tiles = [...tiles, ...dedupe(openersFor(mode), [...tiles, ...selected])].slice(0, 8);
       }
       json(res, 200, { tiles, source: mode === 'answer' ? 'predicted' : mode, ms: Date.now() - t0, coreSlots: slots });
     } catch (e) {
       // Never leave him staring at an empty grid because a model timed out.
-      json(res, 200, { tiles: OPENERS, source: 'fallback', error: String(e.message) });
+      json(res, 200, { tiles: openersFor(mode), source: 'fallback', error: String(e.message) });
     }
   },
 

@@ -59,6 +59,7 @@ const state = {
   urgent: false,
   listening: false,
   speaking: false,
+  composing: false, // Say it is waiting on the model: the grid is paused until the sheet opens
   mode: 'answer',   // answer | ask | tell — the only way he gets to start a conversation
   coreSlots: 2,     // tiles that never move. Motor learning vs prediction — a measured knob.
   dwellMs: loadDwellMs(),
@@ -146,8 +147,12 @@ bus.on((event) => {
 /** Six events, driving the confirm sheet. A switch user must be able to speak. */
 let sheetIdx = 0;
 let gridGen = 0, sheetGen = 0;   // bumped on every re-render: what a blink snapshot is checked against
+// Everything on the sheet he can land on: the numbered sentences, Back, and Urgent. Urgent is on
+// the sheet because the sheet covers the whole screen and owns every input while it is up, so
+// without it the emergency grid was behind a Back he first had to find and fire.
+const sheetOptions = () => [...$$('.candidate'), $('#cancel'), $('#sheet-urgent')];
 function sheetEvent(event) {
-  const opts = [...$$('.candidate'), $('#cancel')];
+  const opts = sheetOptions();
   if (!opts.length) return;
   if (event === 'LEFT' || event === 'UP') sheetIdx = (sheetIdx - 1 + opts.length) % opts.length;
   else if (event === 'RIGHT' || event === 'DOWN') sheetIdx = (sheetIdx + 1) % opts.length;
@@ -190,14 +195,17 @@ async function pick(tile) {
   // sentence block "can't breathe" entirely. It speaks immediately, interrupting whatever is
   // playing, and keeps his in-progress sentence. The grid that exists so he is never trapped must
   // never itself be blocked.
+  // It is logged as its own one-pick utterance. Counting it into the kept sentence used to log
+  // "I need the bathroom." as 16 selections and 730 s, the half-built sentence's numbers.
   if (state.urgent) {
-    if (!state.startedAt) state.startedAt = performance.now();
-    state.selections++;
-    await say(state.instant[norm(tile)] ?? `${tile}.`, { instant: true, keep: true, interrupt: true });
+    await say(state.instant[norm(tile)] ?? `${tile}.`,
+      { instant: true, keep: true, interrupt: true, startedAt: performance.now(), selections: 1 });
     return;
   }
 
-  if (state.speaking) return;
+  // While Say it is building the sentence, the words it was sent are the sentence. A word picked
+  // now never reached the model, so the spoken sentence left it out and reset() then deleted it.
+  if (state.speaking || state.composing) return;
   if (!state.startedAt) state.startedAt = performance.now();
 
   // "yes" needs no sentence built around it.
@@ -218,6 +226,7 @@ async function pick(tile) {
 const norm = (s) => String(s).toLowerCase().trim();
 
 function undo() {
+  if (state.composing) return;   // the words are with the model; see pick()
   retractIfRecent();   // he's correcting a pick — don't let the map learn the mistake
   if (!state.selected.length) return;
   state.selected.pop();
@@ -284,6 +293,11 @@ async function toggleUrgent() {
     const res = await fetch('/api/urgent');
     if (!res.ok) throw new Error(`urgent ${res.status}`);
     const { tiles } = await res.json();
+    // A sentence still being built must not open its sheet over the emergency grid, and no sheet
+    // may stay up over it: the sheet owns every input, so he could only reach his sentences.
+    composeSeq++;
+    if (state.composing) setComposing(false);   // or the urgent grid would sit greyed and paused
+    if (!$('#confirm').hidden) closeConfirm();
     state.urgent = true;
     document.body.classList.add('in-urgent');
     $('#urgent').textContent = 'Back';
@@ -298,12 +312,14 @@ async function toggleUrgent() {
 }
 
 async function compose() {
-  if (!state.selected.length || state.speaking) return;
+  if (!state.selected.length || state.speaking || state.composing || state.urgent) return;
   const seq = ++composeSeq;
   const mode = state.mode;
   const selected = [...state.selected];
 
-  $('#compose').disabled = true;
+  // A real model takes seconds. Until the sheet opens, picks and Undo wait (pick(), undo(), the
+  // gaze and blink paths), and the screen says so, or his eye keeps picking words that are lost.
+  setComposing(true);
   try {
     const res = await fetch('/api/compose', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -312,28 +328,45 @@ async function compose() {
     });
     if (!res.ok) throw new Error(`compose ${res.status}`);
     const { candidates } = await res.json();
-    if (seq !== composeSeq || mode !== state.mode) return;   // he moved on
+    // He moved on: Urgent, another mode, or (belt and braces) different words than were sent.
+    if (seq !== composeSeq || state.urgent || mode !== state.mode
+        || selected.join('\u0001') !== state.selected.join('\u0001')) return;
     showConfirm(candidates ?? []);
   } catch (e) {
-    toast(`Could not build the sentence: ${e.message}`);
+    if (seq === composeSeq) toast(`Could not build the sentence: ${e.message}`);
   } finally {
-    $('#compose').disabled = !state.selected.length;
+    // Only the latest request owns the flag: Urgent already cleared it for this one, and a newer
+    // Say it may be waiting now.
+    if (seq === composeSeq) setComposing(false);
   }
 }
 
-/** answer = reply to them. ask = put a question to them. tell = say something unprompted. */
+function setComposing(on) {
+  state.composing = on;
+  document.body.classList.toggle('building', on);
+  $('#compose').textContent = on ? 'Building your sentence…' : COMPOSE_LABEL[state.mode];
+  renderControls();
+  if (on) resetDwell();   // nothing half-armed on the paused grid fires when it comes back
+}
+
+// answer = reply to them. ask = put a question to them. tell = say something unprompted.
+//
+// The words he has picked survive a mode change. Only the grid and the sentence Say it builds
+// depend on the mode. Clearing them meant one brush of a tab threw away minutes of picks, with
+// no Undo to bring them back. Tapping the tab already on, or any tab in urgent, does nothing:
+// urgent keeps his sentence, and the tabs are dimmed there.
+const COMPOSE_LABEL = { answer: 'Say it', ask: 'Ask it', tell: 'Say it' };
 function setMode(mode) {
+  if (mode === state.mode || state.urgent) return;
   state.mode = mode;
-  state.selected = [];
-  state.selections = 0;
-  state.startedAt = null;
+  if (!state.selected.length) { state.selections = 0; state.startedAt = null; }
   for (const m of ['answer', 'ask', 'tell']) {
     const b = $(`#m-${m}`);
     b.classList.toggle('on', m === mode);
     b.setAttribute('aria-selected', String(m === mode));
   }
   $('#partner-block').hidden = mode !== 'answer';
-  $('#compose').textContent = mode === 'ask' ? 'Ask it' : 'Say it';
+  if (!state.composing) $('#compose').textContent = COMPOSE_LABEL[mode];
   $('#mode-eye').textContent = `Mode: ${MODE_NAME[mode]}`;
   renderSelected();
   renderHUD();
@@ -341,8 +374,8 @@ function setMode(mode) {
 }
 
 // The header tabs are hidden in camera modes, so eyes and blink users switch mode with one button
-// that steps through the three. It only works with no words picked: setMode clears the sentence,
-// and a misfire must never throw away a sentence that took him minutes.
+// that steps through the three. It only works with no words picked: a misfire mid-sentence would
+// quietly change what Say it builds out of words that took him minutes.
 const MODE_NEXT = { answer: 'ask', ask: 'tell', tell: 'answer' };
 const MODE_NAME = { answer: 'Answer', ask: 'Ask', tell: 'Say' };
 function cycleMode() {
@@ -352,7 +385,9 @@ function cycleMode() {
 
 /** "Wait, I'm talking." keep:true: the button that buys him time must not delete his sentence. */
 function sayWait() {
-  say("Wait — I'm saying something.", { instant: true, keep: true });
+  // Its own one-pick row in the log, not the half-built sentence's count and clock.
+  say("Wait — I'm saying something.",
+    { instant: true, keep: true, startedAt: performance.now(), selections: 1 });
 }
 
 /* ---------- speaking ---------- */
@@ -405,14 +440,16 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt
 let sheetArmed = false;   // has he moved to an option yet? a long blink before this does nothing.
 /** Move the highlight across the numbered options + Back, and show which one is current. */
 function highlightSheet() {
-  const opts = [...$$('.candidate'), $('#cancel')];
+  const opts = sheetOptions();
   // The .cursor class is the highlight. Moving DOM focus here put it on a button, where the scan
   // driver's keys stopped working, and did it again on every gaze frame over the sheet.
   opts.forEach((o, i) => o.classList.toggle('cursor', i === sheetIdx && sheetIdx >= 0));
 }
+// Steps visit Urgent first, then option 1, 2, ... and Back: the same order as the grid, where the
+// first step from a fresh grid lands on Urgent. An emergency costs one step; a sentence one more.
 function sheetNext() {
-  const n = $$('.candidate').length + 1;   // +1 for Back
-  sheetIdx = (sheetIdx + 1 + n) % n;       // from -1, first step lands on option 1
+  const n = sheetOptions().length;
+  sheetIdx = nextZone(sheetIdx, n, n - 1);   // Urgent is the last option on the sheet
   sheetArmed = true;
   highlightSheet();
 }
@@ -420,7 +457,14 @@ function sheetConfirm() {
   // Never fire an option he hasn't landed on. A single long blink on a just-opened sheet must
   // not speak candidate 1 — he has to move to it first (a short blink, or a gaze dwell).
   if (!sheetArmed || sheetIdx < 0) return;
-  [...$$('.candidate'), $('#cancel')][sheetIdx]?.click();
+  sheetOptions()[sheetIdx]?.click();
+}
+
+// Urgent from the sheet: close it and open the emergency grid. Never a toggle here, or a sheet
+// that somehow opened over the urgent grid would take him OUT of it.
+function sheetUrgent() {
+  closeConfirm();
+  if (!state.urgent) toggleUrgent();
 }
 
 function closeConfirm() {
@@ -446,35 +490,57 @@ let player = null;
  * must not be logged, and his words must survive.
  */
 let speakWatchdog = null;
+// Each say() is one generation. An Urgent pick can interrupt a say() that is still waiting for its
+// audio, where there is nothing yet to pause: when that audio arrived it used to play over "can't
+// breathe", take over the shared player and watchdog, and clear state.speaking under it. Now a
+// superseded call checks its generation after every await and quietly stops. Its fetch is aborted.
+let sayGen = 0, sayAbort = null;
+// "Turn the mic back on when this ends" belongs to whatever is speaking LAST. Kept per call, it was
+// dropped by every interrupt (the interrupting call saw the mic already off), and Listen stayed
+// off for the rest of the session. App prompts (speakPrompt) share it for the same reason.
+let resumeListening = false;
 
-async function say(text, { instant = false, keep = false, interrupt = false } = {}) {
+async function say(text, { instant = false, keep = false, interrupt = false,
+  startedAt: t0 = null, selections = null } = {}) {
   // Urgent interrupts; everything else waits its turn. Without interrupt, a stuck utterance could
   // block the emergency grid — with it, "can't breathe" always speaks.
   if (state.speaking && !interrupt) return;
+  const gen = ++sayGen;
+  const stale = () => gen !== sayGen;
+  sayAbort?.abort();
+  const abort = (sayAbort = new AbortController());
+  if (state.listening) { resumeListening = true; stopListening(); }   // or the mic hears his voice
   clearSpeaking();                     // kill any current audio and reset the flag first
+  stopPrompt();                        // his words cut off an app instruction, never talk over it
   state.speaking = true;
+  renderControls();
   closeConfirm();
 
-  const startedAt = state.startedAt ?? performance.now();
-  const wasListening = state.listening;
-  if (wasListening) stopListening();   // or the mic hears his own voice and answers itself
+  const startedAt = t0 ?? state.startedAt ?? performance.now();
 
   let url = null;
+  const drop = () => { if (url) { URL.revokeObjectURL(url); url = null; } };
   const done = () => {
+    drop();
+    if (stale()) return;               // a newer say() owns the flag, the watchdog and the mic
     clearTimeout(speakWatchdog);
-    if (url) { URL.revokeObjectURL(url); url = null; }
     state.speaking = false;
-    if (wasListening) startListening();
+    renderControls();                  // Say it was greyed while he spoke; give it back
+    if (resumeListening) { resumeListening = false; startListening(); }
   };
 
   try {
     const res = await fetch('/api/speak', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, voice: state.profile?.voice ?? 'placeholder' }),
+      signal: abort.signal,
     });
+    if (stale()) return;
     if (!res.ok) throw new Error(`speak ${res.status}`);
 
-    url = URL.createObjectURL(await res.blob());
+    const blob = await res.blob();
+    if (stale()) return;
+    url = URL.createObjectURL(blob);
     player = new Audio(url);
     player.onended = done;
     player.onerror = done;
@@ -485,10 +551,13 @@ async function say(text, { instant = false, keep = false, interrupt = false } = 
     speakWatchdog = setTimeout(done, Math.max(4000, text.length * 140));
 
     await player.play();               // a rejected promise here is the browser blocking sound
+    if (stale()) return drop();        // interrupted before it got going: not said, not logged
     speaking(text);
-    logUtterance(text, startedAt, instant);
+    logUtterance(text, startedAt, instant, selections ?? state.selections);
     if (!keep) reset();
   } catch (e) {
+    // Superseded: the newer call owns the screen. No toast, and no sheet reopened over it.
+    if (stale() || e.name === 'AbortError') return drop();
     done();
     toast(e.name === 'NotAllowedError'
       ? 'The browser blocked the sound. Tap anywhere on the page, then try again.'
@@ -508,7 +577,7 @@ function clearSpeaking() {
 }
 
 /** selections_per_sentence and seconds_to_sentence are the numbers the research is about. */
-function logUtterance(text, startedAt, instant) {
+function logUtterance(text, startedAt, instant, selections) {
   const elapsed = Math.max(0.4, (performance.now() - startedAt) / 1000);
   const words = text.trim().split(/\s+/).length;
   fetch('/api/log', {
@@ -519,7 +588,7 @@ function logUtterance(text, startedAt, instant) {
       mode: state.mode,
       urgent: state.urgent,
       instant,
-      selections_per_sentence: state.selections,
+      selections_per_sentence: selections,
       seconds_to_sentence: +elapsed.toFixed(1),
       effective_wpm: +(words / (elapsed / 60)).toFixed(1),
       predictive: state.predictive,
@@ -742,7 +811,7 @@ function trackControl(ctrl, locked) {
 // few, stacked vertically, so vertical (the weak gaze axis) does the least work.
 let sheetDwellIdx = -1, sheetDwellStart = 0;
 function dwellOverSheet(x, y, locked) {
-  const opts = [...$$('.candidate'), $('#cancel')];
+  const opts = sheetOptions();
   let hit = -1;
   for (let i = 0; i < opts.length; i++) {
     const r = opts[i].getBoundingClientRect();
@@ -799,7 +868,8 @@ function onGazePoint(x, y, locked) {
   // On the grid, dwell pauses while speaking, EXCEPT for Urgent and the urgent grid. He must be
   // able to reach "can't breathe" while a long sentence is still playing (an urgent pick
   // interrupts the audio), so that one button stays live.
-  if (state.speaking && !state.urgent && ctrl !== 'urgent') return resetDwell();
+  // Same while Say it is building the sentence: the grid is paused until the sheet opens.
+  if ((state.speaking || state.composing) && !state.urgent && ctrl !== 'urgent') return resetDwell();
   if (trackControl(ctrl, locked)) return;
 
   const i = tileUnder(x, y);
@@ -898,7 +968,6 @@ function commitGazeTile(i, pre = null) {
 // un-arm the word. Each part carries the render it belongs to: if the words changed while his eyes
 // were shut, the blink says nothing, so it can never say a word he did not see armed.
 let blinkTarget = null;
-const sheetOptions = () => [...$$('.candidate'), $('#cancel')];
 function snapshotBlinkTarget() {
   const sheetOpen = !$('#confirm').hidden;
   blinkTarget = {
@@ -1015,6 +1084,8 @@ async function startGaze() {
       if (state.driver === 'blink') {
         const el = $('.tile.cursor, .actions > button.cursor');
         if (kind === 'short') { blinkStep(); return blinkFeedback('seen'); }
+        // A word while Say it is building does nothing (pick()), so it must not flash as said.
+        if (long && state.composing && el?.classList.contains('tile')) return blinkFeedback('ignored', el, held);
         if (long) { blinkFeedback('fired', el); return bus.emit('SELECT'); }
         return blinkFeedback('ignored', el, held);
       }
@@ -1034,7 +1105,7 @@ async function startGaze() {
         return fireControl(snap.control);
       }
       // In the urgent grid a blink fires even mid-sentence: pick() interrupts the audio for it.
-      if (snap.tile && (!state.speaking || state.urgent)) {
+      if (snap.tile && ((!state.speaking && !state.composing) || state.urgent)) {
         blinkFeedback('fired', el);
         return commitGazeTile(snap.tile.i, snap.pre);
       }
@@ -1074,7 +1145,7 @@ async function startGaze() {
           : okX ? `Left and right is good, but up and down is too loose. Keep your head level and try again.`
           : `Up and down is good, but left and right is too loose. Try again.`;
         toast(msg);
-        say(msg, { instant: true, keep: true });
+        speakPrompt(msg);
         return;
       }
       $('#calib').hidden = false;
@@ -1090,7 +1161,7 @@ async function startGaze() {
         if (p.moveHead && !calibPhase2) {
           calibPhase2 = true;
           const m = 'Now follow the dot again — but this time move your head around a little as you go.';
-          say(m, { instant: true, keep: true });
+          speakPrompt(m);
         }
         $('#calib-msg').textContent = p.moveHead
           ? 'Follow the dot — and move your head around as you do.'
@@ -1235,7 +1306,7 @@ async function signalCheck() {
       ? `Signal is ${verdict}. Now calibrate.`
       : `Too noisy. Sit closer, put more light on your face, and raise the camera to eye level.`;
   toast(`${snr.toFixed(1)}x — ${verdictMsg}`);
-  say(verdictMsg, { instant: true, keep: true });   // he does not have to read it either
+  speakPrompt(verdictMsg);   // he does not have to read it either
 
   fetch('/api/gazelog', {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1262,21 +1333,54 @@ async function prompt(msg, x, y) {
   await new Promise((r) => setTimeout(r, 450));
 }
 
-/** Instructions, spoken. This is an app that talks; it should talk to HIM too. */
-let promptPlayer = null;
+/**
+ * Instructions, spoken. This is an app that talks; it should talk to HIM too.
+ *
+ * The app's own voice, never his. Calibration verdicts, test results and "look at the dot" used to
+ * go through say(): spoken in his cloned voice, shown in the banner as his words, logged as his
+ * utterances (a third of sessions.jsonl, at 750-2,700 wpm), and they shut the sentence sheet under
+ * him. Here: the placeholder voice, no banner, no log, the sheet left alone, and state.speaking
+ * untouched, so his gaze and blinks stay live while it talks. It never talks over his own speech,
+ * and say() cuts it off. Resolves when it has finished (or could not play).
+ */
+let promptPlayer = null, promptGen = 0;
 async function speakPrompt(text) {
+  if (state.speaking) return;
+  const gen = ++promptGen;
+  stopPrompt(false);
+  // The mic must not hear the app either. Same hand-off as say().
+  if (state.listening) { resumeListening = true; stopListening(); }
+  let url = null;
+  const finish = () => {
+    if (url) { URL.revokeObjectURL(url); url = null; }
+    if (gen !== promptGen) return;
+    promptPlayer = null;
+    if (!state.speaking && resumeListening) { resumeListening = false; startListening(); }
+  };
   try {
     const res = await fetch('/api/speak', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, voice: 'placeholder' }),
     });
-    if (!res.ok) return;
-    const url = URL.createObjectURL(await res.blob());
-    promptPlayer?.pause();
-    promptPlayer = new Audio(url);
-    promptPlayer.onended = () => URL.revokeObjectURL(url);
-    await promptPlayer.play().catch(() => {});
+    if (!res.ok || gen !== promptGen || state.speaking) return finish();
+    const blob = await res.blob();
+    if (gen !== promptGen || state.speaking) return finish();
+    url = URL.createObjectURL(blob);
+    const p = (promptPlayer = new Audio(url));
+    await new Promise((resolve) => {
+      p.onended = p.onerror = resolve;
+      p._stop = resolve;               // stopPrompt() settles it too
+      p.play().catch(resolve);
+    });
   } catch {}
+  finish();
+}
+/** Silence an app instruction. bump: also void one still waiting for its audio. */
+function stopPrompt(bump = true) {
+  if (bump) promptGen++;
+  const p = promptPlayer;
+  promptPlayer = null;
+  if (p) { try { p.pause(); } catch {} p._stop?.(); }
 }
 
 /** A tone when sampling starts, a lower one when it ends. He needs to know when to hold still. */
@@ -1325,7 +1429,7 @@ async function runGazeAccuracy() {
   clearScreen();
   await new Promise((r) => setTimeout(r, 400));
 
-  say('Look at each highlighted word.', { instant: true, keep: true });
+  speakPrompt('Look at each highlighted word.');
   await new Promise((r) => setTimeout(r, 1400));
 
   const tiles = $$('.tile');
@@ -1381,7 +1485,7 @@ async function runGazeAccuracy() {
   const pct = Math.round((hits / results.length) * 100);
   const msg = `Hit ${hits} of ${results.length}. After bias correction: ${hitsDebiased} of ${withPos.length}.`;
   toast(msg);
-  say(msg, { instant: true, keep: true });
+  speakPrompt(msg);
   $('#gaze-state').textContent =
     `Accuracy ${hits}/${results.length} raw · ${hitsDebiased}/${withPos.length} debiased · bias (${Math.round(bdx)}, ${Math.round(bdy)})px`;
 
@@ -1461,7 +1565,6 @@ function renderGrid() {
 }
 
 function renderSelected() {
-  $('#compose').disabled = !state.selected.length || state.speaking;
   $('#composing').hidden = state.selected.length === 0;
   $('#composing-words').textContent = state.selected.join(' ');
   renderControls();
@@ -1474,6 +1577,9 @@ function renderSelected() {
 function renderControls() {
   const aiming = state.driver === 'scan' || state.driver === 'gaze' || state.driver === 'blink';
   for (const b of $$('.eyes-extra')) b.hidden = !aiming;
+  // Every change to these flags re-renders here (say() start and end, compose, urgent), so Say it
+  // can never stay greyed after the reason has gone. It used to stick after an Undo mid-speech.
+  $('#compose').disabled = !state.selected.length || state.speaking || state.composing || state.urgent;
   $('#undo-eye').disabled = state.urgent || !state.selected.length;
   $('#mode-eye').disabled = state.urgent || state.selected.length > 0;
 }
@@ -1494,6 +1600,7 @@ $('#compose').onclick = compose;
 $('#urgent').onclick = toggleUrgent;
 $('#undo').onclick = undo;
 $('#cancel').onclick = closeConfirm;
+$('#sheet-urgent').onclick = sheetUrgent;
 $('#listen').onclick = () => (state.listening ? stopListening() : startListening());
 $('#hold').onclick = sayWait;
 $('#undo-eye').onclick = undo;
@@ -1592,7 +1699,7 @@ $('#calibrate').onclick = async () => {
     : undefined;
 
   calibPhase2 = false;
-  say('Look at each dot, then follow the moving one with your eyes.', { instant: true, keep: true });
+  speakPrompt('Look at each dot, then follow the moving one with your eyes.');
   try {
     await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
   } catch (e) {
@@ -1632,7 +1739,7 @@ $('#recenter').onclick = async () => {
   $('#calib-msg').textContent = 'Look at the dot.';
   $('#calib-msg').style.left = '50%';
   $('#calib-msg').style.top = '64%';
-  say('Look at the dot.', { instant: true, keep: true });
+  speakPrompt('Look at the dot.');
   await new Promise((r) => setTimeout(r, 1100));
   const r = await gaze.recenter(0.5, 0.5);
   $('#calib').hidden = true;
