@@ -15,6 +15,7 @@
 
 import { createMic } from '/mic.js';
 import { createGaze } from '/gaze.js';
+import { blinkAction, nextZone } from '/blinkscan.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -94,11 +95,33 @@ const zones = () => [...state.tiles, SAY, URGENT,
 const ZONE_ACT = { [SAY]: () => compose(), [URGENT]: () => toggleUrgent(), [UNDO]: () => undo(),
   [HOLD]: () => sayWait(), [MODE]: () => cycleMode() };
 
+let navAt = 0;   // when he last moved the cursor himself (loadTiles keeps his place if he did)
 function moveCursor(d) {
   const n = zones().length;
   if (!n) return;
   state.cursor = (state.cursor + d + n) % n;   // wrap by REAL length: grids shrink below 8
+  navAt = performance.now();
   renderGrid();
+}
+
+// Blinks driver: a step goes forward only, so the order is the whole cost. Urgent comes first on
+// the main grid, one step from a fresh grid instead of nine. Inside the urgent grid the urgent
+// tiles come first and Back stays at the end, or his first step there would land on Back.
+let blinkIdleTimer = null;
+const BLINK_IDLE_MS = 15000;
+function blinkStep() {
+  const z = zones();
+  state.cursor = nextZone(state.cursor, z.length, state.urgent ? -1 : z.indexOf(URGENT));
+  navAt = performance.now();
+  renderGrid();
+  // A highlight he walked away from must not be fired by his eyes resting later. Left alone this
+  // long, it clears, and he steps to it again.
+  clearTimeout(blinkIdleTimer);
+  blinkIdleTimer = setTimeout(() => {
+    if (state.driver !== 'blink' || !$('#confirm').hidden || state.cursor < 0) return;
+    state.cursor = -1;
+    renderGrid();
+  }, BLINK_IDLE_MS);
 }
 
 bus.on((event) => {
@@ -129,17 +152,25 @@ function sheetEvent(event) {
   if (event === 'LEFT' || event === 'UP') sheetIdx = (sheetIdx - 1 + opts.length) % opts.length;
   else if (event === 'RIGHT' || event === 'DOWN') sheetIdx = (sheetIdx + 1) % opts.length;
   else if (event === 'UNDO') return closeConfirm();
-  else if (event === 'SELECT') return opts[sheetIdx].click();
+  else if (event === 'SELECT') {
+    // The sheet opens with nothing highlighted, so the first press only lands on option 1. It
+    // used to call opts[-1].click() and throw.
+    if (sheetIdx < 0) sheetIdx = 0;
+    else return opts[sheetIdx].click();
+  }
   highlightSheet();
 }
 
 // Keyboard → the six events. Only while the scanning driver is on, and NEVER while the
 // caregiver is typing: a spacebar in the partner box used to fire SELECT on the pinned "yes"
 // tile and make the device say "Yes." out loud, in the patient's voice.
+// Buttons are NOT exempt: a focused button (a tapped tile, the gear, Say it after Back) used to
+// swallow every arrow and Backspace, trapping a switch user. preventDefault below stops the
+// button's own Space/Enter click, so nothing fires twice.
 window.addEventListener('keydown', (e) => {
   if (state.driver !== 'scan') return;
   const t = e.target;
-  if (/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(t.tagName) || t.isContentEditable) return;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable) return;
   if (!$('#settings').hidden) return;
 
   const map = { ArrowLeft: 'LEFT', ArrowRight: 'RIGHT', ArrowUp: 'UP', ArrowDown: 'DOWN',
@@ -199,6 +230,7 @@ async function loadTiles() {
   const seq = ++tilesSeq;
   const mode = state.mode;
   const partner = mode === 'answer' ? $('#partner-said').value.trim() : '';
+  const reqAt = performance.now();
 
   try {
     const res = await fetch('/api/tiles', {
@@ -213,9 +245,10 @@ async function loadTiles() {
     // word. Applying this now would overwrite the emergency grid or show him the wrong words.
     if (seq !== tilesSeq || state.urgent || mode !== state.mode) return;
 
+    const was = zones()[state.cursor];
     state.tiles = (tiles ?? []).slice(0, 8);
     state.pinned = coreSlots ?? 0;
-    state.cursor = cursorForNewTiles();
+    state.cursor = cursorForNewTiles(navAt > reqAt ? was : undefined);
     $('#m-src').textContent = source === 'fallback' ? 'model down — fallback tiles'
       : source === 'predicted' ? `predicted ${ms}ms` : source;
     renderGrid();
@@ -226,7 +259,13 @@ async function loadTiles() {
 
 // In Eyes mode the cursor is wherever his eye is. Jumping it to tile 0 on every new grid put the
 // gold frame on a word he was not looking at, while the armed word sat somewhere else.
-function cursorForNewTiles() {
+//
+// In Blinks mode a new grid starts with NOTHING highlighted (-1), like the sentence sheet. Tile 0
+// is usually "yes", which speaks at once, so starting there meant one eye-rest said "Yes." for
+// him. keep: the zone he stepped to while this grid was loading. If it is still on screen the
+// highlight follows it; if it is gone, nothing is highlighted rather than whatever took its place.
+function cursorForNewTiles(keep) {
+  if (state.driver === 'blink') return keep === undefined ? -1 : zones().indexOf(keep);
   return state.driver === 'gaze' && dwellTile >= 0 && dwellTile < state.tiles.length ? dwellTile : 0;
 }
 
@@ -355,7 +394,7 @@ function openConfirm() {
 function renderSheetHint() {
   $('#sheet-hint').hidden = state.driver !== 'gaze' && state.driver !== 'blink';
   $('#sheet-hint').textContent = state.driver === 'blink'
-    ? 'Blink to move to the next one. Close your eyes until the beep to say it.'
+    ? 'Blink firmly to move to the next one. Close your eyes until the beep to say it.'
     : state.confirmBy === 'dwell'
       ? 'Look at one and keep looking to say it, or close your eyes until the beep.'
       : 'Look at one, then close your eyes until the beep to say it.';
@@ -367,8 +406,9 @@ let sheetArmed = false;   // has he moved to an option yet? a long blink before 
 /** Move the highlight across the numbered options + Back, and show which one is current. */
 function highlightSheet() {
   const opts = [...$$('.candidate'), $('#cancel')];
+  // The .cursor class is the highlight. Moving DOM focus here put it on a button, where the scan
+  // driver's keys stopped working, and did it again on every gaze frame over the sheet.
   opts.forEach((o, i) => o.classList.toggle('cursor', i === sheetIdx && sheetIdx >= 0));
-  if (sheetIdx >= 0) opts[sheetIdx]?.focus();
 }
 function sheetNext() {
   const n = $$('.candidate').length + 1;   // +1 for Back
@@ -385,7 +425,10 @@ function sheetConfirm() {
 
 function closeConfirm() {
   $('#confirm').hidden = true;
-  $('#compose').focus();
+  // Focus back on Say it helps a touch user on a keyboard. For the aiming drivers the cursor is
+  // the only place he is, and a focused Say it left a switch user's Space reopening the sheet.
+  if (state.driver === 'touch') $('#compose').focus();
+  else document.activeElement?.blur?.();
 }
 
 let player = null;
@@ -632,6 +675,8 @@ const ARM_GRACE_MS = 300;
 const ARM_SEEN_MS = 250;    // armed this long before a blink may say it: new words appearing under
                             // his eye must be SEEN armed first, not said by a blink already closing
 let lastCommitAt = 0;
+let lastBlinkActAt = 0;            // Blinks driver: the last blink that stepped or selected
+const BLINK_REFRACTORY_MS = 400;
 const clearArmed = () => [...$$('.tile'), ...$$('.actions > button')]
   .forEach((t) => t?.classList.remove('armed', 'ready'));
 
@@ -934,6 +979,17 @@ async function startGaze() {
       if (kind === 'reflex') return;                   // a natural blink: nothing to say about it
       const long = kind === 'long';
 
+      // BLINKS DRIVER: every blink is a command, so a natural one must do nothing, in the sheet as
+      // on the grid. Only a blink clearly longer than an ordinary one steps; only one as long as his
+      // Blink length selects (blinkscan.js). Natural blinks often come in pairs, so the second
+      // blink inside BLINK_REFRACTORY_MS of an acted one is dropped too.
+      if (state.driver === 'blink') {
+        const act = blinkAction(kind, held, state.blinkMs);
+        if (!act) return;
+        if (performance.now() - lastBlinkActAt < BLINK_REFRACTORY_MS) return blinkFeedback('ignored');
+        lastBlinkActAt = performance.now();
+      }
+
       // The sentence sheet. In Blinks mode a quick blink steps to the next numbered option; in Eyes
       // mode his gaze does that, and a stray natural blink must not move the highlight under him.
       // A long blink says the option that was highlighted when his lids started to close.
@@ -955,9 +1011,10 @@ async function startGaze() {
       // BLINK DRIVER: he selects entirely by blinking, no gaze pointing. Quick blink steps the
       // cursor to the next tile; held blink selects it (single-switch scanning, eyelid as switch).
       // Blinks are NOT blocked during speech — he must be able to reach and fire URGENT mid-sentence.
+      // A new grid has nothing highlighted, so a long blink before his first step selects nothing.
       if (state.driver === 'blink') {
         const el = $('.tile.cursor, .actions > button.cursor');
-        if (kind === 'short') { moveCursor(1); return blinkFeedback('seen'); }
+        if (kind === 'short') { blinkStep(); return blinkFeedback('seen'); }
         if (long) { blinkFeedback('fired', el); return bus.emit('SELECT'); }
         return blinkFeedback('ignored', el, held);
       }
@@ -1470,7 +1527,9 @@ $('#driver').onchange = (e) => {
   // default layout it is 144px (~1.6°) — too tight. Shrinking the chrome raises it ~44%.
   document.body.classList.toggle('gaze-mode', cam);
   if (cam) startGaze(); else stopGaze();
-  if (state.driver === 'blink') state.cursor = 0;   // start on the first tile; blinks step from here
+  // Blinks start with nothing highlighted: his first step lands on Urgent, then the tiles. Starting
+  // on tile 0 ("yes") let one eye-rest right after the switch say "Yes." for him.
+  if (state.driver === 'blink') { state.cursor = -1; lastBlinkActAt = performance.now(); }
   renderControls();
   renderGrid();
 };
