@@ -240,12 +240,46 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     };
     return { irisX: +sd(0).toFixed(4), irisY: +sd(1).toFixed(4) };
   }
+  // Both are null while no face is seen, and each carries a frame number (seq). Without that, a
+  // poll after he turned away kept reading the last good frame: recenter "succeeded" on 55 copies
+  // of one stale value, and the signal check measured zero noise on a frozen reading.
   let lastSample = null;      // the latest gaze point + raw features, for the accuracy test
-  let lastRaw = null;         // the unsmoothed feature vector — the signal check reads this
+  let lastRaw = null;         // { v, seq }: the unsmoothed features, open-eye frames only (signal check)
+  let rawSeq = 0, gazeSeq = 0;
   let lastFrameAt = 0, detectFails = 0, stallTimer = null;
   let lastLid = 0;            // reject frames where he blinked: they carry no gaze at all
   let session = 0;            // bumped by stop(): a camera restart still in flight must not revive it
   let recovering = false;
+  let importProblem = '';     // why the last import() refused a saved map, for the app to say
+
+  // WHERE THE PAGE SITS ON THE GLASS. The map turns eyes into page pixels, but his eyes point at
+  // the physical screen. When the page moves on the screen (fullscreen on or off, a toolbar, the
+  // window dragged), every target moves by that much while his eyes do not. That is a shift, not
+  // a scale, so the map is kept in the page coordinates of calibration time and shifted by how far
+  // the page has moved since. Browser chrome is assumed to sit on top (Safari and Chrome on a Mac).
+  function pageOrigin() {
+    const cx = window.outerWidth - window.innerWidth, cy = window.outerHeight - window.innerHeight;
+    // Page zoom or a docked panel makes the chrome size meaningless: then assume nothing moved.
+    if (!(cx >= 0 && cx < 400 && cy >= 0 && cy < 400)) return null;
+    return { x: window.screenX + cx / 2, y: window.screenY + cy,
+      sw: window.screen.width, sh: window.screen.height, dpr: window.devicePixelRatio };
+  }
+  /** How far the page has moved on the screen since calibration, in page pixels. */
+  function pageShift() {
+    const a = fit?.origin, b = pageOrigin();
+    // A different monitor or zoom level is not a shift we can work out: leave the map as it is.
+    if (!a || !b || a.sw !== b.sw || a.sh !== b.sh || a.dpr !== b.dpr) return { x: 0, y: 0 };
+    return { x: a.x - b.x, y: a.y - b.y };
+  }
+
+  /** Was this map made on the camera that is open now? A different lens or aspect moves every feature. */
+  function sameCamera(f) {
+    const c = f?.cam;
+    if (c?.id && camera?.id) { if (c.id !== camera.id) return false; }
+    else if (c?.label && camera?.label && c.label !== camera.label) return false;
+    if (f?.cw && f?.ch && camera?.w && camera?.h && Math.abs(f.cw / f.ch - camera.w / camera.h) > 0.02) return false;
+    return true;
+  }
 
   // A background tab gets no animation frames, so no camera frames are read. That is not a dead
   // camera: restart the stall clock when he comes back, or the first check fires on the old time.
@@ -265,8 +299,9 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
   /** Make a freshly opened camera the live one. */
   function attach(s, v) {
     stream = s; video = v; lastTs = -1;
-    const t = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
-    camera = { w: t.width ?? 0, h: t.height ?? 0, fps: t.frameRate ?? 0 };
+    const tr = stream.getVideoTracks()[0];
+    const t = tr?.getSettings?.() ?? {};
+    camera = { w: t.width ?? 0, h: t.height ?? 0, fps: t.frameRate ?? 0, id: t.deviceId ?? '', label: tr?.label ?? '' };
     // The track ending (unplugged, revoked, grabbed by another app) is recoverable too: it may
     // come back, and he has no hands to turn eye tracking off and on.
     const mine = stream;
@@ -287,6 +322,7 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     const mine = session;
     onFace(false);
     gate.reset(); preBlink = null; lastOut = null;
+    lastRaw = null; lastSample = null;
     onError(`${why} Restarting the camera...`, { fatal: false });
     stream?.getTracks().forEach((t) => t.stop());
     video?.remove();
@@ -306,6 +342,9 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
         lastFrameAt = performance.now();
         recovering = false;
         onRecovered?.();
+        // The camera that came back may be a different one (the external one unplugged, the
+        // built-in one opened instead). The map still runs, but it was made for the other lens.
+        if (fit && !sameCamera(fit)) onError('A different camera is on now. Calibrate again for this one.', { fatal: false });
         return;
       } catch (e) {
         if (mine !== session) return;
@@ -371,7 +410,11 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     const face = out.faceBlendshapes?.[0]?.categories;
     const lm = out.faceLandmarks?.[0];
     // 478 landmarks means the iris points are there. 468 means they are not, and gaze is dead.
-    if (!face?.length || !lm || lm.length < 478) { gate.reset(); preBlink = null; onFace(false); return; }
+    if (!face?.length || !lm || lm.length < 478) {
+      gate.reset(); preBlink = null; lastRaw = null; lastSample = null;
+      onFace(false);
+      return;
+    }
     onFace(true);
 
     // How many pixels wide is the iris, really? Below ~12 the landmark cannot resolve where it
@@ -381,7 +424,6 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     }
 
     const fRaw = features(lm, face, out.facialTransformationMatrixes?.[0]);
-    lastRaw = fRaw.v;
     lastLid = fRaw.lid;
     trackNoise(fRaw.v);
     const f = { ...fRaw, v: smoothFeatures(fRaw.v) };
@@ -389,6 +431,9 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     // The lids, both eyes, against his own open level (blinkgate.js). The snapshot is taken BEFORE
     // onLidsClosing, so the app reads the point from before the lids moved.
     const g = gate.step(lastFrameAt, f.L, f.R);
+    // A blink frame carries no gaze. One in the signal check's "hold still" window used to turn a
+    // good camera into "too noisy".
+    lastRaw = g.gated || fRaw.lid > BLINK_ON ? null : { v: fRaw.v, seq: ++rawSeq };
     if (g.entered) {
       // Only a point from the last few frames counts: one from before a face loss is stale.
       preBlink = lastOut && lastF && lastFrameAt - lastOut.t < 200
@@ -419,15 +464,16 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     }
     lastF = lastF ? lastF.map((v, k) => v + 0.30 * (fv[k] - v)) : fv;   // steady BEFORE the model
     const [px0, py0] = model.predict(lastF);
-    const rx = Math.max(0, Math.min(window.innerWidth, px0 + bias.x));
-    const ry = Math.max(0, Math.min(window.innerHeight, py0 + bias.y));
+    const sh = pageShift();
+    const rx = Math.max(0, Math.min(window.innerWidth, px0 + bias.x + sh.x));
+    const ry = Math.max(0, Math.min(window.innerHeight, py0 + bias.y + sh.y));
 
     const now = performance.now();
     const [mx, my] = median(rx, ry);
     const [x, y, locked] = fixate(mx, my, now);
 
     lastOut = { x, y, mx, my, locked, t: lastFrameAt };
-    lastSample = { x, y, locked, raw: f.v.map((n) => +n.toFixed(3)) };
+    lastSample = { x, y, locked, raw: f.v.map((n) => +n.toFixed(3)), seq: ++gazeSeq };
     onGaze(x, y, locked);
   }
 
@@ -488,13 +534,21 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
       calibrating = true;
       cancelled = false;
       const frames = [];
-      collector = (fr) => frames.push(fr);
+      const ok = (fr) => !fr.gated && fr.lid < BLINK_ON;   // no frame with the lids moving
+      let usable = 0;                                        // what the counter shows: frames the fit can use
+      collector = (fr) => { frames.push(fr); if (ok(fr)) usable++; };
       try {
         const B = bounds ?? { x0: 0.10, x1: 0.90, y0: 0.16, y1: 0.86 };
         const W = window.innerWidth, H = window.innerHeight;
+        const origin = pageOrigin();
         const lerp = (a, b, t) => a + (b - a) * t;
         const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        const check = () => { if (cancelled) throw new Error('cancelled'); };
+        // A camera that drops out mid-run used to leave the dots running over no frames for up to
+        // 45 s. Stop at the next step instead; the app says why and he can start again.
+        const check = () => {
+          if (cancelled) throw new Error('cancelled');
+          if (!running || recovering) throw new Error('the camera dropped out. Try again when it is back.');
+        };
 
         // 1. Still dots. Only frames from 500 ms after the dot lands count: before that the eye is
         //    still travelling.
@@ -512,13 +566,17 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
           const t0 = performance.now();
           await sleep(1100);
           stillWin.push({ t0, t1: performance.now(), x: x * W, y: y * H });
-          onSample?.(frames.length);
         }
 
         // 2. The moving dot: a Lissajous figure over the working area, no sharp turns to catch up on.
         const timeline = [];
         const SECS = 35;
-        onCalibrationProgress({ state: 'pursuit', pass: 0, total: 1, x: (B.x0 + B.x1) / 2, y: B.y0, progress: 0 });
+        const at = (sec) => [lerp(B.x0, B.x1, 0.5 + 0.5 * Math.sin((2 * Math.PI * sec) / 13)),
+          lerp(B.y0, B.y1, 0.5 + 0.5 * Math.sin((2 * Math.PI * sec) / 8.5 + 0.7))];
+        // Wait where the path STARTS. Waiting at the top edge made the dot jump most of the area the
+        // moment it began to move, and he lost it.
+        const [sx, sy] = at(0);
+        onCalibrationProgress({ state: 'pursuit', start: true, x: sx, y: sy, progress: 0 });
         await sleep(1500);
         const tStart = performance.now();
         const pursuitFrom = frames.length;
@@ -526,24 +584,22 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
           check();
           const sec = (performance.now() - tStart) / 1000;
           if (sec > SECS) break;
-          const x = lerp(B.x0, B.x1, 0.5 + 0.5 * Math.sin((2 * Math.PI * sec) / 13));
-          const y = lerp(B.y0, B.y1, 0.5 + 0.5 * Math.sin((2 * Math.PI * sec) / 8.5 + 0.7));
+          const [x, y] = at(sec);
           timeline.push({ t: performance.now(), x: x * W, y: y * H });
-          onCalibrationProgress({ state: 'pursuit', pass: 0, total: 1, x, y, progress: sec / SECS });
-          onSample?.(frames.length);
+          onCalibrationProgress({ state: 'pursuit', x, y, progress: sec / SECS });
+          onSample?.(usable);
           await new Promise((r) => requestAnimationFrame(r));
         }
         collector = null;
 
-        const ok = (fr) => !fr.gated && fr.lid < BLINK_ON;   // no frame with the lids moving
         const still = [];
         for (const w of stillWin) {
           for (const fr of frames) if (fr.t >= w.t0 && fr.t <= w.t1 && ok(fr)) still.push({ fr, x: w.x, y: w.y });
         }
         const moving = frames.slice(pursuitFrom).filter((fr) => ok(fr) && fr.t >= timeline[0].t + 400 && fr.t <= timeline.at(-1).t);
+        // A plain throw, not onError: this is a result he can retry at once, with the camera on.
         if (still.length < 60 || moving.length < 200) {
-          onError('Calibration failed: your face was not visible enough. More light, sit closer.', { fatal: false });
-          return false;
+          throw new Error('your face was not visible enough. More light, sit closer.');
         }
 
         const cw = video?.videoWidth || camera.w, ch = video?.videoHeight || camera.h;   // video is null mid-restart
@@ -564,25 +620,35 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
           dotAt,
         );
 
-        fit = { ref, lidBasis, lambda: cal.lambda, lag: cal.lag, cw, ch, errX: cal.errX, errY: cal.errY };
-        model = cal.model;
-        terrain = cal.samples.map((p) => ({ f: p.f, x: p.x, y: p.y }));
-        sinceRefit = 0;
-        bias = { x: 0, y: 0 };
-        lastF = null; lastOut = null; preBlink = null;
-        median = makeMedian();
-        fixate = makeFixation();
-
         const t = document.querySelector('.tile')?.getBoundingClientRect();
         const tileW = t?.width || W / 4, tileH = t?.height || H / 2;
+        const usable = cal.errX < tileW * 0.45 && cal.errY < tileH * 0.45;
+
+        // A LOOSE FIT NEVER REPLACES A WORKING ONE. He recalibrates while slumped, the fit comes out
+        // too loose, and the map he has been using all week used to be gone, in memory and on disk 4 s
+        // later. Keep the old one. With no map at all a loose one beats none, but it is marked loose
+        // so it is never saved over a map on disk.
+        const kept = !usable && !!model && !fit?.loose;
+        if (!kept) {
+          fit = { ref, lidBasis, lambda: cal.lambda, lag: cal.lag, cw, ch, errX: cal.errX, errY: cal.errY,
+            origin, cam: { id: camera?.id ?? '', label: camera?.label ?? '' }, loose: !usable };
+          model = cal.model;
+          terrain = cal.samples.map((p) => ({ f: p.f, x: p.x, y: p.y }));
+          sinceRefit = 0;
+          bias = { x: 0, y: 0 };
+          lastF = null; lastOut = null; preBlink = null;
+          median = makeMedian();
+          fixate = makeFixation();
+        }
+
         onCalibrationProgress({
           state: 'done', errorPx: cal.stillErrPx, errX: cal.errX, errY: cal.errY,
-          usable: cal.errX < tileW * 0.45 && cal.errY < tileH * 0.45, backend,
+          usable, kept, backend,
           variant: `linear · delay ${cal.lag}ms · λ${cal.lambda}`, lag: cal.lag, lambda: cal.lambda,
           samples: still.length + moving.length, nStill: still.length, nMoving: moving.length,
           tile: { w: Math.round(tileW), h: Math.round(tileH) },
         });
-        return true;
+        return !kept;
       } finally {
         // Whatever happens (a throw, a cancel, a lost face) the flag comes down. Otherwise a failed
         // run locks calibration out forever and he can never try again.
@@ -608,7 +674,9 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
       const f = feats ?? lastF;
       if (!model || !f) return null;
       const id = ++learnId;
-      terrain.push({ f: [...f], x: screenX, y: screenY, id });
+      // The tile is where it is on the page NOW; the terrain is in calibration-time page pixels.
+      const sh = pageShift();
+      terrain.push({ f: [...f], x: screenX - sh.x, y: screenY - sh.y, id });
       if (terrain.length > TERRAIN_CAP) terrain.shift();
       if (++sinceRefit >= REFIT_EVERY) { sinceRefit = 0; fitThroughId = learnId; rebuild(); }
       return id;
@@ -633,28 +701,36 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
 
     /** Persist / restore the calibration + terrain, so he never re-teaches the app his own eyes. */
     export() {
-      return model && fit ? { v: 3, fit, terrain, bias, sw: window.innerWidth, sh: window.innerHeight } : null;
+      // A loose map (made with no earlier one to fall back on) runs this session but is never
+      // saved: it would overwrite whatever good map is on disk.
+      return model && fit && !fit.loose ? { v: 3, fit, terrain, bias } : null;
     },
     import(saved) {
+      importProblem = '';
       // v2 maps were made by the old tracker's features; they cannot drive this model.
       if (saved?.v !== 3 || !saved.fit?.ref || !Array.isArray(saved.terrain)) return false;
-      const sw = saved.sw || window.innerWidth, sh = saved.sh || window.innerHeight;
-      const kx = window.innerWidth / sw, ky = window.innerHeight / sh;
+      // Made on another camera, or this one at a different shape: every feature is off, and the
+      // "welcome back" toast would have told him all was well.
+      if (!sameCamera(saved.fit)) { importProblem = 'camera'; return false; }
       const clean = saved.terrain.filter((s) => Array.isArray(s.f) && s.f.every(Number.isFinite)
         && Number.isFinite(s.x) && Number.isFinite(s.y));
       if (clean.length < 100) return false;
-      fit = saved.fit;
-      terrain = clean.slice(-TERRAIN_CAP).map((s) => ({ ...s, x: s.x * kx, y: s.y * ky }));
+      // No rescaling by window size: a window that changed size or moved is a SHIFT of the page on
+      // the screen (pageShift), not a stretch. A map saved before the origin was recorded is taken
+      // to be where the page is now.
+      fit = saved.fit.origin ? saved.fit : { ...saved.fit, origin: pageOrigin() };
+      terrain = clean.slice(-TERRAIN_CAP);
       learnId = terrain.reduce((m, s) => (s.id > m ? s.id : m), 0);
       fitThroughId = learnId;               // import() refits on everything it loaded
       const b = saved.bias ?? { x: 0, y: 0 };
-      bias = { x: (Number.isFinite(b.x) ? b.x : 0) * kx, y: (Number.isFinite(b.y) ? b.y : 0) * ky };
+      bias = { x: Number.isFinite(b.x) ? b.x : 0, y: Number.isFinite(b.y) ? b.y : 0 };
       lastF = null; lastOut = null; preBlink = null;
       median = makeMedian();
       fixate = makeFixation();
       return rebuild();
     },
     get terrainSize() { return terrain.length; },
+    get importProblem() { return importProblem; },
 
     recalibrate() { model = null; fit = null; bias = { x: 0, y: 0 }; },
 
@@ -688,19 +764,27 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
       const want = { x: nx * window.innerWidth, y: ny * window.innerHeight };
       const got = [];
       const until = performance.now() + 2200;
-      bias = { x: 0, y: 0 };
+      // The old bias stays in place until a new one is measured. Zeroing it first meant a failed
+      // recenter (a blink, a look away) threw away all the drift correction learned so far.
+      // Only NEW open-eye frames count (gazeSeq), so a turned-away head fails instead of locking
+      // on to one stale frame. 15 frames still lets a ~10 fps CPU camera pass in 2.2 s.
+      let seen = lastSample?.seq ?? -1;
       while (performance.now() < until) {
         await new Promise((r) => setTimeout(r, 40));
-        if (!lastF || lastLid > BLINK_ON || gate.gated) continue;
+        if (!running || recovering) return false;
+        if (!lastSample || !lastF || lastSample.seq === seen || lastLid > BLINK_ON || gate.gated) continue;
+        seen = lastSample.seq;
         got.push(model.predict(lastF));
       }
-      if (got.length < 20) return false;
+      if (got.length < 15) return false;
       const mid = (k) => got.map((g) => g[k]).sort((a, b) => a - b)[Math.floor(got.length / 2)];
-      bias = { x: want.x - mid(0), y: want.y - mid(1) };
+      // got is in calibration-time page pixels; the dot is where the page is now.
+      const sh = pageShift();
+      bias = { x: want.x - mid(0) - sh.x, y: want.y - mid(1) - sh.y };
       return { dx: Math.round(bias.x), dy: Math.round(bias.y) };
     },
 
-    /** The unmapped eye signal itself. The signal check needs this, not the screen point. */
+    /** The unmapped eye signal itself, { v, seq }, or null (no face, or a blink). The signal check reads this. */
     raw() { return lastRaw; },
 
     /** The raw signal, for diagnosis. If gaze is wrong, the answer is in here. */

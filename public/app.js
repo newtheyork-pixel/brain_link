@@ -129,7 +129,7 @@ bus.on((event) => {
   // The sheet owns the six events while it is up. Without this, SELECT reaches through and
   // picks a tile on the hidden grid — corrupting the very sentence awaiting confirmation.
   if (!$('#confirm').hidden) return sheetEvent(event);
-  if (!$('#calib').hidden) return;
+  if (!$('#calib').hidden || gazeTesting) return;
 
   const cols = 4;
   if (event === 'LEFT')  return moveCursor(-1);
@@ -673,7 +673,21 @@ function stopListening() {
 let gaze = null;
 let dwellTile = -1, dwellStart = 0;
 let dwellTrace = [];       // where his gaze actually sat during the dwell — free ground truth
-let calibPhase2 = false;
+let pursuitCued = false;   // "now follow the moving dot" said once per calibration
+// The accuracy test shows the live grid (no #calib overlay), so the #calib guards do not cover it.
+// While this is set his gaze arms nothing and his blinks and switches pick nothing: a blink used to
+// say a word mid-test and rebuild the grid under the measurement.
+let gazeTesting = false;
+// Escape bumps this. The signal check, recenter and accuracy test stop at their next step.
+let overlayGen = 0;
+/** A check for an overlay flow: throws once Escape was pressed or this camera g has gone. */
+function overlayGuard(g) {
+  const gen = overlayGen;
+  return () => {
+    if (gen !== overlayGen) throw new Error('cancelled');
+    if (gaze !== g || !g.running) throw new Error('the camera stopped');
+  };
+}
 
 // TILE HYSTERESIS.
 //
@@ -850,6 +864,10 @@ function onGazePoint(x, y, locked) {
   // In BLINK mode the cursor is driven by blinks, not by where he looks — so hide the gaze dot
   // and never let gaze move the cursor, or the two would fight each other.
   if (state.driver === 'blink') { dot.hidden = true; resetDwell(); return; }
+
+  // The accuracy test measures where his eye goes on its own. A visible dot lets him steer it onto
+  // the target, which scores the steering, not the tracker. Nothing arms or re-renders either.
+  if (gazeTesting) { dot.hidden = true; return resetDwell(); }
 
   dot.hidden = false;
   dot.style.transform = `translate(${x}px, ${y}px)`;
@@ -1028,7 +1046,7 @@ async function startGaze() {
     // Eyes still shut, and shut long enough: a soft beep so he knows he can open them. Only when
     // opening them will actually DO something, or every rest of the eyes would beep at him.
     onBlinkHeld: () => {
-      if (!$('#calib').hidden) return;
+      if (!$('#calib').hidden || gazeTesting) return;
       const sheetOpen = !$('#confirm').hidden;
       const el = state.driver !== 'blink' ? blinkTargetEl(blinkTarget)
         : sheetOpen ? (sheetArmed && sheetIdx >= 0 ? sheetOptions()[sheetIdx] : null)
@@ -1044,7 +1062,7 @@ async function startGaze() {
       // still frozen). Keep the snapshot for that; a long blink or a rest uses it up.
       if (kind === 'long' || kind === 'rest') blinkTarget = null;
       $$('.ready').forEach((e) => e.classList.remove('ready'));
-      if (!$('#calib').hidden) return;                 // never during calibration
+      if (!$('#calib').hidden || gazeTesting) return;  // never during calibration or the test
       if (kind === 'reflex') return;                   // a natural blink: nothing to say about it
       const long = kind === 'long';
 
@@ -1128,9 +1146,11 @@ async function startGaze() {
         $('#calib-bar').hidden = true;
         $('#gaze-state').textContent =
           `X ±${p.errX}px / Y ±${p.errY}px · tile ${p.tile.w}x${p.tile.h} · ${p.samples} samples · ${p.variant}`
-          + ` · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
-        // Persist the fresh terrain immediately — he should never re-teach the app his own eyes.
-        scheduleGazeSave();
+          + ` · ${p.usable ? 'usable' : 'TOO LOOSE'}${p.kept ? ', kept the previous map' : ''}`;
+        // Persist a good fresh terrain immediately: he should never re-teach the app his own eyes.
+        // Only a good one. A loose fit is not installed over a working map (gaze.js), and one
+        // installed for lack of anything better is never written over the map on disk.
+        if (p.usable) scheduleGazeSave();
         fetch('/api/gazelog', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ kind: 'calibration', ...p,
@@ -1139,11 +1159,12 @@ async function startGaze() {
         // Judge each axis against its OWN tile dimension. Horizontal was already fine while
         // vertical was failing, and a single blended number hid that completely.
         const okX = p.errX < p.tile.w * 0.45, okY = p.errY < p.tile.h * 0.45;
-        const msg = (okX && okY)
+        const loose = (okX && okY)
           ? `Calibrated. Now run the test.`
           : !okX && !okY ? `Calibration is too loose in both directions. Sit still and try again.`
           : okX ? `Left and right is good, but up and down is too loose. Keep your head level and try again.`
           : `Up and down is good, but left and right is too loose. Try again.`;
+        const msg = p.kept ? `${loose} Your previous calibration is still in use.` : loose;
         toast(msg);
         speakPrompt(msg);
         return;
@@ -1158,17 +1179,19 @@ async function startGaze() {
         // The dot MOVES and he follows it. Following a slowly moving target is a reflex, not a
         // skill — which is why this collects hundreds of clean samples where nine dots gave nine.
         d.classList.add('pursuit');
-        if (p.moveHead && !calibPhase2) {
-          calibPhase2 = true;
-          const m = 'Now follow the dot again — but this time move your head around a little as you go.';
-          speakPrompt(m);
+        // The switch from still dots to a moving one needs a cue, or he is still waiting for a beep
+        // while the dot sets off without him.
+        if (p.start && !pursuitCued) {
+          pursuitCued = true;
+          beep(660, 0.12);
+          speakPrompt('Now follow the moving dot.');
         }
-        $('#calib-msg').textContent = p.moveHead
-          ? 'Follow the dot — and move your head around as you do.'
-          : 'Follow the dot with your eyes. Head still.';
+        $('#calib-msg').textContent = 'Follow the dot with your eyes. Head still.';
+        // At the top, above the path (the bounds start at 10% or lower). At 86% the words sat on
+        // the bottom of the loop, the dot passed under them and he lost it.
         $('#calib-msg').style.left = '50%';
-        $('#calib-msg').style.top = '86%';
-        $('#calib-bar').style.width = `${Math.round(((p.pass + p.progress) / p.total) * 100)}%`;
+        $('#calib-msg').style.top = '3%';
+        $('#calib-bar').style.width = `${Math.round(p.progress * 100)}%`;
         $('#calib-bar').hidden = false;
         return;
       }
@@ -1197,6 +1220,11 @@ async function startGaze() {
   if (saved && g.import(saved)) {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — remembered your eyes (${g.terrainSize} samples). Recenter if the dot is off.`;
     toast('Welcome back — your eye calibration was remembered.');
+  } else if (saved && g.importProblem === 'camera' && state.driver !== 'blink') {
+    // Not loaded, and not deleted: until he calibrates this camera, plugging the old one back in
+    // brings its map back.
+    $('#gaze-state').textContent = `Camera on (${g.backend}). Different camera from last time: not calibrated yet.`;
+    toast('This is a different camera from last time. Calibrate once for it.');
   } else if (state.driver === 'blink') {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — blink to select.`;
     toast('Camera on. Blink to move. Close your eyes until the beep to pick.');
@@ -1246,21 +1274,40 @@ function loadGazeMap() {
  */
 async function signalCheck() {
   if (!gaze?.running) return toast('Turn the camera on first.');
+  if (gaze.calibrating) return toast('Calibration is running. Press Escape to stop it.');
+  // This camera, held for the whole check: if it stops, the check stops, instead of reading a
+  // module-level gaze that is now null and leaving the overlay up until a reload.
+  const g = gaze;
+  const live = overlayGuard(g);
+  try {
+    await runSignalCheck(g, live);
+  } catch (e) {
+    if (String(e.message) !== 'cancelled') toast(`Signal check stopped: ${e.message}`);
+  } finally {
+    endCalibrationUI();
+  }
+}
 
+async function runSignalCheck(g, live) {
+  // New, open-eye frames only: raw() is null with no face or mid-blink, and seq skips a frame
+  // already counted (the poll is faster than the camera).
   const grab = async (ms) => {
     const out = [];
+    let seen = -1;
     const until = performance.now() + ms;
     while (performance.now() < until) {
-      const s = gaze.raw();
-      if (s) out.push(s);
+      live();
+      const s = g.raw();
+      if (s && s.seq !== seen) { seen = s.seq; out.push(s.v); }
       await new Promise((r) => setTimeout(r, 40));
     }
     return out;
   };
-  const meanX = (a) => a.reduce((s, v) => s + v[0], 0) / (a.length || 1);
-  const sdX = (a) => {
-    const m = meanX(a);
-    return Math.sqrt(a.reduce((s, v) => s + (v[0] - m) ** 2, 0) / (a.length || 1));
+  // k: 0 = left/right (iris x), 1 = up/down (iris y).
+  const mean = (a, k) => a.reduce((s, v) => s + v[k], 0) / (a.length || 1);
+  const sd = (a, k) => {
+    const m = mean(a, k);
+    return Math.sqrt(a.reduce((s, v) => s + (v[k] - m) ** 2, 0) / (a.length || 1));
   };
 
   $('#calib').hidden = false;
@@ -1270,8 +1317,10 @@ async function signalCheck() {
   // it. That is the whole point of the test. So the app SAYS it out loud, and the target moves
   // to where he should be looking — he never has to look away to find out what to do next.
   const step = async (msg, x, y, settleMs, sampleMs) => {
+    live();
     await prompt(msg, x, y);
     await new Promise((r) => setTimeout(r, settleMs));
+    live();
     beep(880);
     $('#calib-dot').classList.add('sampling');
     const data = await grab(sampleMs);
@@ -1283,36 +1332,47 @@ async function signalCheck() {
   const still = await step('Look at the dot in the middle. Hold still.', 0.5, 0.5, 900, 1600);
   const left  = await step('Now look at the dot on the far left.',       0.03, 0.5, 1200, 1300);
   const right = await step('Now the dot on the far right.',              0.97, 0.5, 1200, 1300);
+  // Up and down too. That is the axis that fails (the calibration verdict says so most often),
+  // and a check that only looked left and right said "good" while it was failing.
+  const top    = await step('Now the dot at the top.',                   0.5, 0.05, 1200, 1300);
+  const bottom = await step('Now the dot at the bottom.',                0.5, 0.95, 1200, 1300);
 
   $('#calib').hidden = true;
 
-  if (still.length < 10 || left.length < 6 || right.length < 6) {
+  if (still.length < 10 || left.length < 6 || right.length < 6 || top.length < 6 || bottom.length < 6) {
     return toast('Could not see your face well enough. More light, and sit closer.');
   }
 
-  const noise = sdX(still);
-  const travel = Math.abs(meanX(right) - meanX(left));
-  const snr = travel / (noise || 1e-6);
+  // The same iris reading the old check used; a ratio with no units, so it stands in fine for the
+  // model's own features. Each axis judged on its own, and the verdict is the weaker one.
+  const noiseX = sd(still, 0), noiseY = sd(still, 1);
+  const travelX = Math.abs(mean(right, 0) - mean(left, 0));
+  const travelY = Math.abs(mean(bottom, 1) - mean(top, 1));
+  const snrX = travelX / (noiseX || 1e-6), snrY = travelY / (noiseY || 1e-6);
+  const snr = Math.min(snrX, snrY);
   const verdict = snr > 8 ? 'good' : snr > 4 ? 'usable' : 'too noisy';
-  const p = gaze.probe();
+  const p = g.probe();
   const cam = p.camera ? `${p.camera.w}x${p.camera.h}` : '?';
 
   $('#gaze-state').textContent =
-    `${snr.toFixed(1)}x (${verdict}) · travel ${travel.toFixed(3)} / noise ${noise.toFixed(4)} · ${cam}, iris ${p.irisPx}px`;
+    `${snrX.toFixed(1)}x left/right, ${snrY.toFixed(1)}x up/down (${verdict})`
+    + ` · noise ${noiseX.toFixed(4)}/${noiseY.toFixed(4)} · ${cam}, iris ${p.irisPx}px`;
 
   const verdictMsg = p.irisPx && p.irisPx < 12
     ? `Your iris is only ${p.irisPx} pixels wide. Sit closer to the screen.`
     : snr > 4
       ? `Signal is ${verdict}. Now calibrate.`
-      : `Too noisy. Sit closer, put more light on your face, and raise the camera to eye level.`;
-  toast(`${snr.toFixed(1)}x — ${verdictMsg}`);
+      : `${snrY < snrX ? 'Up and down' : 'Left and right'} is too noisy. Sit closer, put more light on your face, and raise the camera to eye level.`;
+  toast(`${snr.toFixed(1)}x: ${verdictMsg}`);
   speakPrompt(verdictMsg);   // he does not have to read it either
 
   fetch('/api/gazelog', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ kind: 'signal', noise: +noise.toFixed(5), travel: +travel.toFixed(4),
+    body: JSON.stringify({ kind: 'signal', noise: +noiseX.toFixed(5), travel: +travelX.toFixed(4),
       snr: +snr.toFixed(2), verdict, probe: p,
-      samples: { still: still.length, left: left.length, right: right.length } }),
+      x: { noise: +noiseX.toFixed(5), travel: +travelX.toFixed(4), snr: +snrX.toFixed(2) },
+      y: { noise: +noiseY.toFixed(5), travel: +travelY.toFixed(4), snr: +snrY.toFixed(2) },
+      samples: { still: still.length, left: left.length, right: right.length, top: top.length, bottom: bottom.length } }),
   }).catch(() => {});
 }
 
@@ -1412,49 +1472,70 @@ function beep(hz = 880, len = 0.12, gain = 0.15) {
  */
 async function testGazeAccuracy() {
   if (!gaze?.calibrated) return toast('Calibrate first.');
+  if (gaze.calibrating || gazeTesting) return;
+  const g = gaze;
+  const live = overlayGuard(g);
   try {
-    await runGazeAccuracy();
+    gazeTesting = true;
+    await runGazeAccuracy(g, live);
   } catch (e) {
-    toast(`Test failed: ${e.message}`);
+    toast(String(e.message) === 'cancelled' ? 'Test stopped.' : `Test failed: ${e.message}`);
   } finally {
-    // No throw may strand him on the black overlay. Always tear it down.
+    // No throw may leave selection switched off, or the overlay up.
+    gazeTesting = false;
     endCalibrationUI();
+    $('#test-chip').hidden = true;
     $$('.tile').forEach((t) => t.classList.remove('target'));
   }
 }
 
-async function runGazeAccuracy() {
+async function runGazeAccuracy(g, live) {
   // The settings drawer sits over the right-hand tiles. Testing with it open asked him to look at
   // words he could not see — which is exactly what happened, and it made the numbers meaningless.
   clearScreen();
+  // No gold cursor or armed tile left over from before: the target is the only thing lit.
+  resetDwell();
+  state.cursor = -1;
+  renderGrid();
   await new Promise((r) => setTimeout(r, 400));
 
   speakPrompt('Look at each highlighted word.');
   await new Promise((r) => setTimeout(r, 1400));
 
-  const tiles = $$('.tile');
+  // He sees the live grid the whole time, so the progress goes in a chip over it. Inside #calib
+  // (hidden for the test) it was never seen.
+  const chip = $('#test-chip');
+  chip.hidden = false;
+  const n = $$('.tile').length;
   const results = [];
-  $('#calib-msg').textContent = 'Look at the highlighted tile';
-  $('#calib').hidden = false;
-  $('#calib-dot').style.display = 'none';
 
-  for (let i = 0; i < tiles.length; i++) {
-    $('#calib').hidden = true;                       // let him actually see the grid
-    tiles.forEach((t, j) => t.classList.toggle('target', i === j));
-    $('#calib-count').textContent = `${i + 1} of ${tiles.length}`;
+  for (let i = 0; i < n; i++) {
+    live();
+    // Look the tiles up fresh every time. A re-render (new suggestions, a partner's words) swaps
+    // the buttons, and a stale one measures as a zero box at (0,0).
+    const cur = $$('.tile');
+    if (!cur[i]) break;
+    cur.forEach((t, j) => t.classList.toggle('target', i === j));
+    chip.textContent = `Look at the blue word · ${i + 1} of ${n} · Escape to stop`;
     await new Promise((r) => setTimeout(r, 1300));   // settle
+    live();
 
+    // Twelve readings, each from a new frame: sample() is null with no face, and seq skips a
+    // frame already counted.
     const pts = [];
+    let seen = -1;
     for (let k = 0; k < 12; k++) {
-      const s = gaze.sample();
-      if (s) pts.push(s);
+      const s = g.sample();
+      if (s && s.seq !== seen) { seen = s.seq; pts.push(s); }
       await new Promise((r) => setTimeout(r, 45));
     }
     if (!pts.length) { results.push({ tile: i, hit: false, reason: 'no face' }); continue; }
 
     const mx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
     const my = pts.reduce((a, p) => a + p.y, 0) / pts.length;
-    const r = tiles[i].getBoundingClientRect();
+    const el = $$('.tile')[i];
+    const r = el?.getBoundingClientRect();
+    if (!r?.width) { results.push({ tile: i, hit: false, reason: 'tile gone' }); continue; }
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
 
     results.push({
@@ -1477,9 +1558,8 @@ async function runGazeAccuracy() {
   const bdy = withPos.reduce((s2, r) => s2 + (r.cy - r.my), 0) / (withPos.length || 1);
   const hitsDebiased = withPos.filter((r) => tileAt(r.mx + bdx, r.my + bdy) === r.tile).length;
 
-  tiles.forEach((t) => t.classList.remove('target'));
-  $('#calib').hidden = true;
-  $('#calib-dot').style.display = '';
+  $$('.tile').forEach((t) => t.classList.remove('target'));
+  chip.hidden = true;
 
   const hits = results.filter((r) => r.hit).length;
   const pct = Math.round((hits / results.length) * 100);
@@ -1497,15 +1577,19 @@ async function runGazeAccuracy() {
       hits, total: results.length, pct,
       hitsDebiased, bias: { x: Math.round(bdx), y: Math.round(bdy) },
       screen: { w: window.innerWidth, h: window.innerHeight },
-      probe: gaze.probe(),
+      probe: g.probe(),
       results,
     }),
   }).catch(() => {});
 }
 
 function stopGaze() {
+  // A run in progress stops with the camera, and its overlay comes down with it: a dead camera
+  // under a black screen with a dot still moving is the one place he cannot get out of.
+  gaze?.cancelCalibration();
   gaze?.stop();
   gaze = null;
+  endCalibrationUI();
   resetDwell();
   $('#gaze-dot').hidden = true;
   $('#gaze-row').hidden = true;
@@ -1679,6 +1763,7 @@ function clearScreen() {
 $('#calibrate').onclick = async () => {
   if (!gaze?.running) return toast('Turn the camera on first.');
   if (gaze.calibrating) return toast('Calibration is already running. Press Escape to stop it.');
+  if (gazeTesting) return;
   clearScreen();
   await new Promise((r) => setTimeout(r, 350));   // let the panel finish getting out of the way
 
@@ -1698,13 +1783,18 @@ $('#calibrate').onclick = async () => {
       }
     : undefined;
 
-  calibPhase2 = false;
+  pursuitCued = false;
   speakPrompt('Look at each dot, then follow the moving one with your eyes.');
   try {
-    await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
+    await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} good frames`; } });
   } catch (e) {
     // A throw used to leave him stranded on a full-screen black overlay with no way out.
-    if (String(e.message) !== 'cancelled') toast(`Calibration failed: ${e.message}`);
+    // Too few good frames lands here too, with the camera still on, so he can press Calibrate
+    // again straight away. It is said aloud, as a good result is.
+    if (String(e.message) !== 'cancelled') {
+      toast(`Calibration failed: ${e.message}`);
+      speakPrompt(`Calibration failed: ${e.message}`);
+    }
   } finally {
     endCalibrationUI();
   }
@@ -1721,31 +1811,46 @@ function endCalibrationUI() {
 
 // Escape always aborts. A full-screen overlay with no exit is unacceptable anywhere, and this is
 // a device for someone who cannot ask for help.
+// Every overlay flow, not just calibration: the signal check, recenter and accuracy test stop at
+// their next step, and an overlay left behind by anything else is taken down.
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  overlayGen++;
   if (gaze?.calibrating) { gaze.cancelCalibration(); toast('Calibration stopped.'); }
+  else if (!$('#calib').hidden) endCalibrationUI();
 });
 $('#test-gaze').onclick = testGazeAccuracy;
 $('#signal-check').onclick = signalCheck;
 $('#recenter').onclick = async () => {
   if (!gaze?.calibrated) return toast('Calibrate first.');
+  if (gaze.calibrating || gazeTesting) return;
+  const g = gaze;
+  const live = overlayGuard(g);
   clearScreen();
-  await new Promise((r) => setTimeout(r, 350));
-  $('#calib').hidden = false;
-  $('#calib-dot').style.display = '';
-  $('#calib-dot').style.left = '50%';
-  $('#calib-dot').style.top = '50%';
-  $('#calib-dot').classList.add('sampling');
-  $('#calib-msg').textContent = 'Look at the dot.';
-  $('#calib-msg').style.left = '50%';
-  $('#calib-msg').style.top = '64%';
-  speakPrompt('Look at the dot.');
-  await new Promise((r) => setTimeout(r, 1100));
-  const r = await gaze.recenter(0.5, 0.5);
-  $('#calib').hidden = true;
-  $('#calib-dot').classList.remove('sampling');
-  toast(r ? `Recentered (${r.dx > 0 ? '+' : ''}${r.dx}, ${r.dy > 0 ? '+' : ''}${r.dy} px).`
-          : 'Could not see your eyes well enough.');
+  try {
+    await new Promise((r) => setTimeout(r, 350));
+    live();
+    $('#calib').hidden = false;
+    $('#calib-dot').style.display = '';
+    $('#calib-dot').style.left = '50%';
+    $('#calib-dot').style.top = '50%';
+    $('#calib-dot').classList.add('sampling');
+    $('#calib-msg').textContent = 'Look at the dot.';
+    $('#calib-msg').style.left = '50%';
+    $('#calib-msg').style.top = '64%';
+    speakPrompt('Look at the dot.');
+    await new Promise((r) => setTimeout(r, 1100));
+    live();
+    const r = await g.recenter(0.5, 0.5);
+    live();
+    if (r) scheduleGazeSave();   // the new offset is worth keeping now, not at the next pick
+    toast(r ? `Recentered (${r.dx > 0 ? '+' : ''}${r.dx}, ${r.dy > 0 ? '+' : ''}${r.dy} px).`
+            : 'Could not see your eyes well enough. The old setting is kept.');
+  } catch (e) {
+    if (String(e.message) !== 'cancelled') toast(`Recenter stopped: ${e.message}`);
+  } finally {
+    endCalibrationUI();
+  }
 };
 function showDwellMs() {
   $('#dwell').value = String(state.dwellMs);
