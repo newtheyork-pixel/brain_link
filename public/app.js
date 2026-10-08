@@ -27,8 +27,26 @@ const loadBlinkMs = () => {
   try { const v = +localStorage.getItem(BLINK_MS_KEY); return v >= 250 && v <= 1200 ? v : 350; }
   catch { return 350; }
 };
+// Look-then-blink or look-and-hold. A caregiver picks it once for him; it must survive a reload,
+// or the fallback for a man who cannot hold a blink silently turns itself off every morning.
+const CONFIRM_KEY = 'stillme.confirmBy';
+const loadConfirmBy = () => {
+  try { return localStorage.getItem(CONFIRM_KEY) === 'dwell' ? 'dwell' : 'blink'; } catch { return 'blink'; }
+};
+const DWELL_MS_KEY = 'stillme.dwellMs';
+const loadDwellMs = () => {
+  try { const v = +localStorage.getItem(DWELL_MS_KEY); return v >= 400 && v <= 2500 ? v : 900; }
+  catch { return 900; }
+};
 const SAY = '__say__';
 const URGENT = '__urgent__';
+const UNDO = '__undo__';
+const HOLD = '__hold__';
+const MODE = '__mode__';
+// Each non-tile zone, its button, and its name as a gaze target. Undo, Wait and Mode live in the
+// big actions row too: the small Undo in the composing strip and the header tabs are touch-sized,
+// and the header is hidden in camera modes, so an eyes-only user could not reach them at all.
+const ZONE_EL = { [SAY]: '#compose', [URGENT]: '#urgent', [UNDO]: '#undo-eye', [HOLD]: '#hold', [MODE]: '#mode-eye' };
 
 const state = {
   selected: [],
@@ -42,9 +60,9 @@ const state = {
   speaking: false,
   mode: 'answer',   // answer | ask | tell — the only way he gets to start a conversation
   coreSlots: 2,     // tiles that never move. Motor learning vs prediction — a measured knob.
-  dwellMs: 900,
+  dwellMs: loadDwellMs(),
   blinkMs: loadBlinkMs(),
-  confirmBy: 'blink',   // 'blink' = look then blink to say; 'dwell' = look and hold
+  confirmBy: loadConfirmBy(),   // 'blink' = look then blink to say; 'dwell' = look and hold
   pinned: 0,
   startedAt: null,
   selections: 0,
@@ -65,8 +83,16 @@ const bus = {
   emit(e) { for (const h of this.handlers) h(e); },
 };
 
-/** Everything the cursor can land on — the tiles, then the two controls. */
-const zones = () => [...state.tiles, SAY, URGENT];
+/**
+ * Everything the cursor can land on: the tiles, then Say it and Urgent, then Undo, Wait and Mode.
+ * The last three come after Urgent so the common path costs a blink user no extra steps, and only
+ * appear when they would do something (Undo needs a word; Mode would wipe a half-built sentence).
+ */
+const zones = () => [...state.tiles, SAY, URGENT,
+  ...(!state.urgent && state.selected.length ? [UNDO] : []), HOLD,
+  ...(!state.urgent && !state.selected.length ? [MODE] : [])];
+const ZONE_ACT = { [SAY]: () => compose(), [URGENT]: () => toggleUrgent(), [UNDO]: () => undo(),
+  [HOLD]: () => sayWait(), [MODE]: () => cycleMode() };
 
 function moveCursor(d) {
   const n = zones().length;
@@ -90,8 +116,7 @@ bus.on((event) => {
   if (event !== 'SELECT') return;
 
   const z = zones()[state.cursor];
-  if (z === SAY) return compose();
-  if (z === URGENT) return toggleUrgent();
+  if (ZONE_ACT[z]) return ZONE_ACT[z]();
   return pick(z);
 });
 
@@ -190,13 +215,19 @@ async function loadTiles() {
 
     state.tiles = (tiles ?? []).slice(0, 8);
     state.pinned = coreSlots ?? 0;
-    state.cursor = 0;
+    state.cursor = cursorForNewTiles();
     $('#m-src').textContent = source === 'fallback' ? 'model down — fallback tiles'
       : source === 'predicted' ? `predicted ${ms}ms` : source;
     renderGrid();
   } catch (e) {
     toast(`Could not load words: ${e.message}`);
   }
+}
+
+// In Eyes mode the cursor is wherever his eye is. Jumping it to tile 0 on every new grid put the
+// gold frame on a word he was not looking at, while the armed word sat somewhere else.
+function cursorForNewTiles() {
+  return state.driver === 'gaze' && dwellTile >= 0 && dwellTile < state.tiles.length ? dwellTile : 0;
 }
 
 async function toggleUrgent() {
@@ -206,6 +237,7 @@ async function toggleUrgent() {
     state.urgent = false;
     document.body.classList.remove('in-urgent');
     $('#urgent').textContent = 'Urgent';
+    renderControls();
     await loadTiles();
     return;
   }
@@ -217,8 +249,9 @@ async function toggleUrgent() {
     document.body.classList.add('in-urgent');
     $('#urgent').textContent = 'Back';
     state.tiles = tiles.slice(0, 8);
-    state.cursor = 0;
+    state.cursor = cursorForNewTiles();
     $('#m-src').textContent = 'urgent — fixed grid';
+    renderControls();
     renderGrid();
   } catch (e) {
     toast(`Urgent grid unavailable: ${e.message}`);
@@ -262,9 +295,25 @@ function setMode(mode) {
   }
   $('#partner-block').hidden = mode !== 'answer';
   $('#compose').textContent = mode === 'ask' ? 'Ask it' : 'Say it';
+  $('#mode-eye').textContent = `Mode: ${MODE_NAME[mode]}`;
   renderSelected();
   renderHUD();
   loadTiles();
+}
+
+// The header tabs are hidden in camera modes, so eyes and blink users switch mode with one button
+// that steps through the three. It only works with no words picked: setMode clears the sentence,
+// and a misfire must never throw away a sentence that took him minutes.
+const MODE_NEXT = { answer: 'ask', ask: 'tell', tell: 'answer' };
+const MODE_NAME = { answer: 'Answer', ask: 'Ask', tell: 'Say' };
+function cycleMode() {
+  if (state.selected.length || state.urgent) return;
+  setMode(MODE_NEXT[state.mode] ?? 'answer');
+}
+
+/** "Wait, I'm talking." keep:true: the button that buys him time must not delete his sentence. */
+function sayWait() {
+  say("Wait — I'm saying something.", { instant: true, keep: true });
 }
 
 /* ---------- speaking ---------- */
@@ -297,15 +346,19 @@ function openConfirm() {
   sheetDwellStart = 0;
   sheetArmed = false;
   sheetGen++;                    // new options: a blink that started before this says nothing
+  renderSheetHint();
+  $('#confirm').hidden = false;
+  highlightSheet();
+}
+
+/** Say the real gesture. In Eyes mode his gaze picks the option; in Blinks mode a quick blink does. */
+function renderSheetHint() {
   $('#sheet-hint').hidden = state.driver !== 'gaze' && state.driver !== 'blink';
-  // Say the real gesture. In Eyes mode his gaze picks the option; in Blinks mode a quick blink does.
   $('#sheet-hint').textContent = state.driver === 'blink'
     ? 'Blink to move to the next one. Close your eyes until the beep to say it.'
     : state.confirmBy === 'dwell'
       ? 'Look at one and keep looking to say it, or close your eyes until the beep.'
       : 'Look at one, then close your eyes until the beep to say it.';
-  $('#confirm').hidden = false;
-  highlightSheet();
 }
 
 const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -531,16 +584,35 @@ function tileUnder(x, y) {
   return -1;
 }
 
-// The two controls are gaze targets too. Which one is his gaze inside?
-let armedControl = null;   // 'say' | 'urgent' | null
+// The action buttons are gaze targets too. Which one is his gaze on?
+//
+// Not the exact button box. The row sits at the bottom edge, where the eye is least accurate and
+// an overshoot clamps the dot to the screen edge (gaze.js), right under a short button. So the
+// WHOLE band below the grid counts, down to the edge, split at the midpoints between buttons.
+// The bottom tiles' own hit box already stops short of their edge (MARGIN), which is the buffer
+// that keeps the band from stealing a look at a bottom-row word.
+let armedControl = null;   // 'say' | 'urgent' | 'undo' | 'hold' | 'mode' | null
 function controlUnder(x, y) {
-  for (const [id, name] of [['#compose', 'say'], ['#urgent', 'urgent']]) {
-    const el = $(id);
-    if (!el || el.disabled) continue;
-    const r = el.getBoundingClientRect();
-    if (r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return name;
+  if (y < $('#grid').getBoundingClientRect().bottom) return null;
+  const btns = $$('.actions > button').filter((b) => !b.hidden && b.getBoundingClientRect().width);
+  const rs = btns.map((b) => b.getBoundingClientRect());
+  for (let k = 0; k < btns.length; k++) {
+    const lo = k === 0 ? -Infinity : (rs[k - 1].right + rs[k].left) / 2;
+    const hi = k === btns.length - 1 ? Infinity : (rs[k].right + rs[k + 1].left) / 2;
+    // A disabled button's slice is dead, not handed to its neighbour: looking at a greyed-out
+    // Say it must not arm Urgent.
+    if (x >= lo && x < hi) return btns[k].disabled ? null : btns[k].dataset.ctrl ?? null;
   }
   return null;
+}
+const controlEl = (c) => (c ? $(`.actions > button[data-ctrl="${c}"]`) : null);
+const CONTROL_ACT = { say: () => compose(), urgent: () => toggleUrgent(), undo: () => undo(),
+  hold: () => sayWait(), mode: () => cycleMode() };
+/** Fire an action button from the eyes: a confirming blink or a completed dwell. */
+function fireControl(c) {
+  lastCommitAt = performance.now();
+  resetDwell();
+  CONTROL_ACT[c]?.();
 }
 
 function tileAt(x, y) {
@@ -560,8 +632,16 @@ const ARM_GRACE_MS = 300;
 const ARM_SEEN_MS = 250;    // armed this long before a blink may say it: new words appearing under
                             // his eye must be SEEN armed first, not said by a blink already closing
 let lastCommitAt = 0;
-const clearArmed = () => [...$$('.tile'), $('#compose'), $('#urgent')]
+const clearArmed = () => [...$$('.tile'), ...$$('.actions > button')]
   .forEach((t) => t?.classList.remove('armed', 'ready'));
+
+// DWELL LATCH. After a dwell picks a word, the predictive grid often puts the next word in the
+// same slot, under the same steady eye, and a plain refractory of a few frames let the dwell
+// start again and pick that new word too. Now the slot (or button) he just used stays quiet until
+// his eye actually goes somewhere else.
+let dwellLatch = -1;          // tile index
+let ctrlLatch = null;         // control name
+let ctrlMiss = 0, ctrlDwellStart = 0;
 
 function resetDwell() {
   dwellTile = -1;
@@ -569,8 +649,48 @@ function resetDwell() {
   dwellTrace = [];
   armedTile = -1;
   armedControl = null;
-  $$('.tile').forEach((t) => { t.style.setProperty('--dwell', '0'); });
+  ctrlMiss = 0;
+  ctrlDwellStart = 0;
+  [...$$('.tile'), ...$$('.actions > button')].forEach((t) => { t.style.setProperty('--dwell', '0'); });
   clearArmed();
+}
+
+/**
+ * The action row under his gaze. Returns true when the row has this frame, so the tiles skip it.
+ *
+ * Same rules as a tile: it arms only on a LOCKED eye, and one stray frame off a big button is
+ * jitter, not a look away, so it stays armed until SWITCH_FRAMES frames in a row disagree.
+ * In dwell mode a ring fills on the button and fires it, exactly as on a tile.
+ */
+function trackControl(ctrl, locked) {
+  const now = performance.now();
+  if (ctrlLatch && locked && ctrl !== ctrlLatch) ctrlLatch = null;   // he moved on: re-enable it
+  if (armedControl && ctrl !== armedControl) {
+    if (++ctrlMiss < SWITCH_FRAMES) return true;
+    controlEl(armedControl)?.style.setProperty('--dwell', '0');
+    armedControl = null;
+    ctrlMiss = 0;
+    clearArmed();
+  } else ctrlMiss = 0;
+  if (!ctrl) return false;
+  if (!locked) { ctrlDwellStart = now; return !!armedControl; }
+
+  const el = controlEl(ctrl);
+  if (armedControl !== ctrl) {
+    clearArmed();
+    armedControl = ctrl; dwellTile = -1; armedTile = -1;
+    ctrlDwellStart = now;
+    el?.classList.add('armed');
+  }
+  if (state.confirmBy !== 'dwell' || ctrl === ctrlLatch) { ctrlDwellStart = now; return true; }
+  const frac = Math.min(1, (now - ctrlDwellStart) / state.dwellMs);
+  el?.style.setProperty('--dwell', String(frac));
+  if (frac >= 1) {
+    ctrlLatch = ctrl;
+    flash(el, 'fired', 450);
+    fireControl(ctrl);
+  }
+  return true;
 }
 
 // Gaze-dwell over the numbered sentence options. Bigger, forgiving targets — there are only a
@@ -627,19 +747,15 @@ function onGazePoint(x, y, locked) {
   // gaze to say it, exactly as he selects a tile. (Blinks work here too — see onBlink.)
   if (!$('#confirm').hidden) return dwellOverSheet(x, y, locked);
 
-  // On the grid, dwell pauses while speaking — EXCEPT in the urgent grid, which he must be able
-  // to dwell-select even mid-utterance (it interrupts).
-  if (state.speaking && !state.urgent) return resetDwell();
-
-  // "Say it" and "Urgent" are gaze targets too. Without this an eyes-only user can build a
-  // sentence and never speak it, and can never reach the emergency grid.
+  // The action row is a gaze target too. Without it an eyes-only user can build a sentence and
+  // never speak it, never undo a misfire, and never reach the emergency grid.
   const ctrl = controlUnder(x, y);
-  if (ctrl && locked) {
-    if (armedControl !== ctrl) { clearArmed(); armedControl = ctrl; dwellTile = -1; armedTile = -1;
-      $(ctrl === 'say' ? '#compose' : '#urgent')?.classList.add('armed'); }
-    return;
-  }
-  if (armedControl && !ctrl) { armedControl = null; clearArmed(); }
+
+  // On the grid, dwell pauses while speaking, EXCEPT for Urgent and the urgent grid. He must be
+  // able to reach "can't breathe" while a long sentence is still playing (an urgent pick
+  // interrupts the audio), so that one button stays live.
+  if (state.speaking && !state.urgent && ctrl !== 'urgent') return resetDwell();
+  if (trackControl(ctrl, locked)) return;
 
   const i = tileUnder(x, y);
 
@@ -654,6 +770,7 @@ function onGazePoint(x, y, locked) {
     resetDwell();
     dwellTile = i;
     dwellStart = performance.now();
+    if (i !== dwellLatch) dwellLatch = -1;   // his eye left the slot he just picked
     if (i >= 0) { state.cursor = i; renderGrid(); }
     return;
   }
@@ -681,11 +798,15 @@ function onGazePoint(x, y, locked) {
   // Armed in BOTH modes: in dwell mode a long blink is a second way to say the filling tile.
   // armedGen: a re-render (new words) replaces the tile under his eye, so re-arm the new one.
   if (armedTile !== i || armedGen !== gridGen) {
+    // New words under his eye restart the dwell too: time spent on the old word is not a choice
+    // of the new one.
+    if (armedGen !== gridGen) { dwellStart = performance.now(); dwellTrace = []; }
     clearArmed(); armedTile = i; armedGen = gridGen; armedSince = performance.now();
     if (state.confirmBy === 'blink') $$('.tile')[i]?.classList.add('armed');
   }
   armedLockedAt = performance.now();
   if (state.confirmBy === 'blink') return;
+  if (i === dwellLatch) { dwellStart = performance.now(); return; }   // just picked: look away first
 
   dwellTrace.push([x, y]);
   const frac = Math.min(1, (performance.now() - dwellStart) / state.dwellMs);
@@ -722,6 +843,7 @@ function commitGazeTile(i, pre = null) {
   lastCommitAt = performance.now();
   resetDwell();
   dwellTile = -2;                      // refractory: don't instantly re-fire on the same tile
+  dwellLatch = i;                      // and no new dwell in this slot until his eye leaves it
   state.cursor = i;                    // SELECT picks the cursor's tile: make sure it is this one
   bus.emit('SELECT');
 }
@@ -742,7 +864,6 @@ function snapshotBlinkTarget() {
     pre: gaze?.preBlink() ?? null,     // the open-eye point and features, for re-anchoring
   };
 }
-const controlEl = (c) => $(c === 'say' ? '#compose' : '#urgent');
 /** The element a snapshot points at, if it is still the same thing he saw armed. */
 function blinkTargetEl(b) {
   if (!b) return null;
@@ -797,7 +918,7 @@ async function startGaze() {
       const sheetOpen = !$('#confirm').hidden;
       const el = state.driver !== 'blink' ? blinkTargetEl(blinkTarget)
         : sheetOpen ? (sheetArmed && sheetIdx >= 0 ? sheetOptions()[sheetIdx] : null)
-        : $('.tile.cursor, #compose.cursor, #urgent.cursor');
+        : $('.tile.cursor, .actions > button.cursor');
       if (!el) return;
       beep(990, 0.07, 0.05);
       el.classList.add('ready');
@@ -835,7 +956,7 @@ async function startGaze() {
       // cursor to the next tile; held blink selects it (single-switch scanning, eyelid as switch).
       // Blinks are NOT blocked during speech — he must be able to reach and fire URGENT mid-sentence.
       if (state.driver === 'blink') {
-        const el = $('.tile.cursor, #compose.cursor, #urgent.cursor');
+        const el = $('.tile.cursor, .actions > button.cursor');
         if (kind === 'short') { moveCursor(1); return blinkFeedback('seen'); }
         if (long) { blinkFeedback('fired', el); return bus.emit('SELECT'); }
         return blinkFeedback('ignored', el, held);
@@ -849,15 +970,14 @@ async function startGaze() {
       // Just committed: ignore blinks for a beat, so one deliberate blink can't fire twice.
       if (!long || !el || performance.now() - lastCommitAt < 700) return blinkFeedback('ignored', el, held);
 
-      // The armed "Say it" / "Urgent" control: an eyes-only user can reach every zone.
+      // An armed action button (Say it, Urgent, Undo, Wait, Mode): an eyes-only user can reach
+      // every zone. While a sentence plays only Urgent can be armed (onGazePoint), so this is safe.
       if (snap.control) {
-        lastCommitAt = performance.now();
         blinkFeedback('fired', el);
-        resetDwell();
-        if (snap.control === 'say') compose(); else toggleUrgent();
-        return;
+        return fireControl(snap.control);
       }
-      if (snap.tile && !state.speaking) {
+      // In the urgent grid a blink fires even mid-sentence: pick() interrupts the audio for it.
+      if (snap.tile && (!state.speaking || state.urgent)) {
         blinkFeedback('fired', el);
         return commitGazeTile(snap.tile.i, snap.pre);
       }
@@ -867,7 +987,9 @@ async function startGaze() {
       $('#gaze-dot').classList.toggle('lost', !found);
       if (!found) { resetDwell(); blinkTarget = null; }
     },
-    onError: (msg) => { toast(msg); stopGaze(); },
+    // Only a fatal error stops tracking (gaze.js recovers from stalls and dropouts by itself).
+    onError: (msg, { fatal = true } = {}) => { toast(msg); if (fatal && gaze === g) gazeStopped(); },
+    onRecovered: () => toast('Camera back. Eye tracking is on again.'),
     onCalibrationProgress: (p) => {
       if (p.state === 'done') {
         $('#calib').hidden = true;
@@ -1228,6 +1350,15 @@ function stopGaze() {
   $('#gaze-row').hidden = true;
 }
 
+// Eye tracking could not go on (camera blocked, no camera, no face model). Do not leave the
+// setting saying Eyes over a dead camera: drop back to touch so the screen tells the truth, and
+// choosing Eyes again in Settings is a real change that restarts it.
+function gazeStopped() {
+  stopGaze();
+  $('#driver').value = 'touch';
+  $('#driver').onchange({ target: $('#driver') });
+}
+
 /* ---------- feedback ---------- */
 
 let toastTimer = null;
@@ -1267,16 +1398,27 @@ function renderGrid() {
     g.appendChild(b);
   });
 
-  // The cursor can rest on Say-it and Urgent too, or a switch user could never speak.
-  const n = state.tiles.length;
-  $('#compose').classList.toggle('cursor', aiming && state.cursor === n);
-  $('#urgent').classList.toggle('cursor', aiming && state.cursor === n + 1);
+  // The cursor can rest on the action buttons too, or a switch user could never speak.
+  const z = zones()[state.cursor];
+  for (const [zone, sel] of Object.entries(ZONE_EL)) $(sel)?.classList.toggle('cursor', aiming && z === zone);
 }
 
 function renderSelected() {
   $('#compose').disabled = !state.selected.length || state.speaking;
   $('#composing').hidden = state.selected.length === 0;
   $('#composing-words').textContent = state.selected.join(' ');
+  renderControls();
+}
+
+/**
+ * The big Undo and Mode buttons, shown for every aiming input (eyes, blinks, switch). They stay in
+ * place when they cannot act, just greyed, so the buttons never move under his eye.
+ */
+function renderControls() {
+  const aiming = state.driver === 'scan' || state.driver === 'gaze' || state.driver === 'blink';
+  for (const b of $$('.eyes-extra')) b.hidden = !aiming;
+  $('#undo-eye').disabled = state.urgent || !state.selected.length;
+  $('#mode-eye').disabled = state.urgent || state.selected.length > 0;
 }
 
 function renderHUD() {
@@ -1296,11 +1438,9 @@ $('#urgent').onclick = toggleUrgent;
 $('#undo').onclick = undo;
 $('#cancel').onclick = closeConfirm;
 $('#listen').onclick = () => (state.listening ? stopListening() : startListening());
-$('#hold').onclick = () => {
-  // keep:true — this is the button that BUYS him time to finish his sentence. It must not be
-  // the button that deletes it.
-  say("Wait — I'm saying something.", { instant: true, keep: true });
-};
+$('#hold').onclick = sayWait;
+$('#undo-eye').onclick = undo;
+$('#mode-eye').onclick = cycleMode;
 $('#confirm').onclick = (e) => { if (e.target.id === 'confirm') closeConfirm(); };
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#confirm').hidden) closeConfirm();
@@ -1325,14 +1465,40 @@ $('#driver').onchange = (e) => {
   const cam = state.driver === 'gaze' || state.driver === 'blink';   // both need the camera
   $('#scan-help').hidden = state.driver !== 'scan';
   $('#blink-help').hidden = state.driver !== 'blink';
-  $('#confirm-row').hidden = state.driver !== 'gaze';   // look-then-blink vs dwell is an Eyes-mode choice
+  syncSettingsRows();
   // Full-bleed for both camera drivers: the vertical half-tile is the error budget, and at the
   // default layout it is 144px (~1.6°) — too tight. Shrinking the chrome raises it ~44%.
   document.body.classList.toggle('gaze-mode', cam);
   if (cam) startGaze(); else stopGaze();
   if (state.driver === 'blink') state.cursor = 0;   // start on the first tile; blinks step from here
+  renderControls();
   renderGrid();
 };
+
+/** Show only the settings that do something for the current input. */
+function syncSettingsRows() {
+  const eyes = state.driver === 'gaze';
+  $('#confirm-row').hidden = !eyes;   // look-then-blink vs dwell is an Eyes-mode choice
+  // The dwell slider only drives Eyes mode with Confirm by Dwell. Shown anywhere else it promised a
+  // hold that never happened.
+  $('#dwell-row').hidden = !(eyes && state.confirmBy === 'dwell');
+  $('#blink-row').hidden = !(eyes || state.driver === 'blink');
+}
+
+// Confirm by: look then blink, or look and hold. Switching clears anything half-armed or half-filled,
+// so changing the setting can never fire a word by itself.
+$('#confirm-by').value = state.confirmBy;
+$('#confirm-by').onchange = (e) => {
+  state.confirmBy = e.target.value === 'dwell' ? 'dwell' : 'blink';
+  try { localStorage.setItem(CONFIRM_KEY, state.confirmBy); } catch { /* still set this session */ }
+  resetDwell();
+  dwellLatch = -1; ctrlLatch = null;
+  sheetDwellIdx = -1; sheetDwellStart = 0;
+  sheetOptions().forEach((o) => o.style.setProperty('--dwell', '0'));
+  renderSheetHint();
+  syncSettingsRows();
+};
+syncSettingsRows();
 $('#gear-float').onclick = () => $('#gear').onclick();
 // Never let him drive with the camera while a panel is over a third of the tiles.
 bus.on(() => { if (state.driver === 'gaze' || state.driver === 'blink') clearScreen(); });
@@ -1351,13 +1517,17 @@ $('#calibrate').onclick = async () => {
 
   // Calibrate across the area he will actually USE — the tiles — not the corners of the glass,
   // where the eyelid swallows the iris and the readings are lies.
+  // The action row (Say it, Urgent, Undo...) is a gaze target too, so the bottom dots reach into
+  // its upper half. Not to its bottom edge: that is the glass corner the comment above warns about.
   const tiles = $$('.tile').map((el) => el.getBoundingClientRect());
+  const bar = $('.actions').getBoundingClientRect();
+  const bottom = Math.max(Math.max(...tiles.map((r) => r.bottom)) - 30, bar.height ? bar.top + bar.height * 0.4 : 0);
   const bounds = tiles.length
     ? {
         x0: Math.max(0.06, (Math.min(...tiles.map((r) => r.left)) + 40) / window.innerWidth),
         x1: Math.min(0.94, (Math.max(...tiles.map((r) => r.right)) - 40) / window.innerWidth),
         y0: Math.max(0.10, (Math.min(...tiles.map((r) => r.top)) + 30) / window.innerHeight),
-        y1: Math.min(0.92, (Math.max(...tiles.map((r) => r.bottom)) - 30) / window.innerHeight),
+        y1: Math.min(0.93, bottom / window.innerHeight),
       }
     : undefined;
 
@@ -1410,10 +1580,16 @@ $('#recenter').onclick = async () => {
   toast(r ? `Recentered (${r.dx > 0 ? '+' : ''}${r.dx}, ${r.dy > 0 ? '+' : ''}${r.dy} px).`
           : 'Could not see your eyes well enough.');
 };
+function showDwellMs() {
+  $('#dwell').value = String(state.dwellMs);
+  $('#dwell-label').textContent = `Hold a tile or button for ${(state.dwellMs / 1000).toFixed(1)}s to pick it.`;
+}
 $('#dwell').oninput = (e) => {
   state.dwellMs = +e.target.value;
-  $('#dwell-label').textContent = `Hold a tile for ${(state.dwellMs / 1000).toFixed(1)}s to pick it.`;
+  try { localStorage.setItem(DWELL_MS_KEY, String(state.dwellMs)); } catch { /* still set this session */ }
+  showDwellMs();
 };
+showDwellMs();
 // Blink length: how long his eyes stay shut to say a word. Remembered on this device, because the
 // right value is a fact about him (how fast he can close and hold), not about one session.
 function showBlinkMs() {

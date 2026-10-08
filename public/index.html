@@ -42,13 +42,17 @@
 <main id="grid" class="grid" role="group" aria-label="Word tiles"></main>
 
 <section class="actions">
+  <!-- Eyes, blinks and switch only: the header tabs and the small Undo are touch-sized, and the
+       header is hidden in camera modes. Without these a misfire could never be taken back. -->
+  <button id="mode-eye" class="ghost eyes-extra" data-ctrl="mode" hidden>Mode: Answer</button>
+  <button id="undo-eye" class="ghost eyes-extra" data-ctrl="undo" hidden disabled>Undo</button>
   <!-- He cannot raise a hand or clear his throat. Without this he can never ENTER a
        conversation — only ever answer one somebody else started. -->
-  <button id="hold" class="hold">Wait — I'm talking</button>
-  <button id="compose" class="primary" disabled>Say it</button>
+  <button id="hold" class="hold" data-ctrl="hold">Wait — I'm talking</button>
+  <button id="compose" class="primary" data-ctrl="say" disabled>Say it</button>
   <!-- Always reachable. If the grid is about Emma's graduation and he can't breathe,
        a predicted grid would trap him. No amount of tile quality fixes that. -->
-  <button id="urgent" class="urgent">Urgent</button>
+  <button id="urgent" class="urgent" data-ctrl="urgent">Urgent</button>
 </section>
 
 <!-- Nothing is ever spoken without him choosing it. -->
@@ -94,11 +98,11 @@
       <option value="dwell">Dwell (look and hold)</option>
     </select>
   </label>
-  <label class="row">
+  <label class="row" id="dwell-row" hidden>
     <span><b>Dwell time</b><em id="dwell-label">Hold a tile for 0.9s to pick it.</em></span>
     <input type="range" id="dwell" min="400" max="2500" step="100" value="900">
   </label>
-  <label class="row">
+  <label class="row" id="blink-row" hidden>
     <span><b>Blink length</b><em id="blink-label">Close your eyes for 0.35s (until the beep) to say a word.</em></span>
     <input type="range" id="blink-ms" min="250" max="1200" step="50" value="350">
   </label>

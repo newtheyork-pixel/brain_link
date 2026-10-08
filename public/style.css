@@ -118,6 +118,7 @@ body.settings-open .composing { padding-right: min(400px, 100%); }
 .settings h2 { margin: 0; font-size: 22px; }
 .settings .row { display: flex; align-items: center; gap: 12px; cursor: pointer;
   padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.settings .row[hidden] { display: none; }   /* display:flex above would beat [hidden] */
 .settings .row span { flex: 1; display: flex; flex-direction: column; }
 .settings .row b { font-size: 16px; font-weight: 650; }
 .settings .row em { font-style: normal; font-size: 13px; color: var(--muted); }
@@ -240,7 +241,29 @@ body.gaze-mode button.listen { padding: 7px 14px; font-size: 13px; }
 body.gaze-mode .composing { padding: 8px 12px; }
 body.gaze-mode .composing strong { font-size: 20px; }
 body.gaze-mode .grid { gap: 8px; }
-body.gaze-mode .actions button { padding: 12px; font-size: 17px; }
+/* THE ACTION ROW IS A GAZE TARGET TOO, at the screen's bottom edge where the eye is least
+   accurate. At 48px tall it was far inside the measured error, so Say it and Urgent could not be
+   held. It now takes a fixed share of the height (the tiles keep the rest), and the gaze hit-test
+   counts the whole band below the grid, down to the edge (app.js controlUnder). Urgent gets a real
+   width: it is the one button that must never be hard to hit. */
+body.gaze-mode .actions { min-height: max(96px, 13vh); gap: 8px; }
+body.gaze-mode .actions > button { flex: 1 1 0; min-width: 0; padding: 8px 10px; font-size: 19px;
+  white-space: normal; line-height: 1.2; position: relative; overflow: hidden; }
+body.gaze-mode #compose { flex-grow: 1.5; }
+body.gaze-mode #urgent { flex: 0 0 22%; }
+body.gaze-mode .actions > button:disabled { opacity: .3; cursor: default; }
+.actions > button[hidden] { display: none; }
+/* armed by his gaze, or the scan cursor resting on it: the same gold as a tile */
+.actions > button.armed, .actions > button.cursor { border: 2px solid var(--gold);
+  box-shadow: 0 0 0 3px rgba(224,179,84,.35); }
+/* the dwell ring on a button, same language as the tiles */
+body.gaze-mode .actions > button::before { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(to top, rgba(224,179,84,.35) 0%,
+              rgba(224,179,84,.35) calc(var(--dwell, 0) * 100%),
+              transparent calc(var(--dwell, 0) * 100%));
+  pointer-events: none; }
+/* Back on the sentence sheet is a gaze target like the options, so it is as wide as they are. */
+body.gaze-mode #cancel { width: min(720px, 100%); padding: 20px; font-size: 21px; }
 /* the gear must stay reachable even with the header gone */
 body.gaze-mode .gear-float { display: flex; }
 .gear-float { display: none; position: fixed; top: 10px; right: 10px; z-index: 6;
@@ -278,13 +301,13 @@ body.gaze-mode .gear-float { display: flex; }
 .gaze-dot.pip-no { scale: 1.4; background: rgba(150,160,175,.30); border-color: var(--muted);
   box-shadow: 0 0 0 6px rgba(150,160,175,.30); }
 /* eyes shut long enough: the word fills, so the moment he opens them he sees what it will say */
-.tile.ready, .candidate.ready, #compose.ready, #urgent.ready {
+.tile.ready, .candidate.ready, .actions > button.ready {
   background: rgba(224,179,84,.42); border-color: var(--gold); }
 /* it was said */
-.tile.fired, .candidate.fired, #compose.fired, #urgent.fired, .cursor.fired {
+.tile.fired, .candidate.fired, .actions > button.fired, .cursor.fired {
   background: var(--gold); border-color: var(--gold); color: #111; }
 /* seen, but did nothing (Blinks mode has no dot, so the cursor carries it) */
 .pip-no:not(.gaze-dot) { box-shadow: 0 0 0 4px rgba(150,160,175,.55); }
 /* nearly long enough: say so on the word itself */
 .tile.armed.too-short::after { content: "longer: till the beep"; color: var(--danger); opacity: 1; }
-.candidate.too-short, #compose.too-short, #urgent.too-short { box-shadow: 0 0 0 4px rgba(217,90,74,.55); }
+.candidate.too-short, .actions > button.too-short { box-shadow: 0 0 0 4px rgba(217,90,74,.55); }

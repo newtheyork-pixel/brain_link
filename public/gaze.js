@@ -127,8 +127,42 @@ function features(lm, face, matrix) {
 // THE OUTPUT STAGE (median + fixation lock) lives in gazemodel.js, so the offline blink replay
 // (eval/gaze/blink.mjs) runs the same code the cursor does.
 
+// getUserMedia can hang forever: no camera, or one another app is holding. A promise that never
+// settles means no error, no toast, and a user tapping a button that says nothing back. Every
+// await on the camera gets a deadline.
+const deadline = (p, ms, what) => Promise.race([
+  p,
+  new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out`)), ms)),
+]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Open the front camera and a playing <video> on it. Throws on failure; cleans up after itself. */
+async function openCamera() {
+  // 640x480 leaves the iris about ten pixels across at laptop distance — the landmark then
+  // quantises to that grid and the jitter IS the signal. Ask for everything the camera has.
+  const s = await deadline(
+    navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280, min: 640 },
+        height: { ideal: 720, min: 480 },
+        frameRate: { ideal: 30 },
+        facingMode: 'user',
+      },
+    }),
+    12000, 'camera',
+  );
+  const v = document.createElement('video');
+  v.autoplay = true; v.playsInline = true; v.muted = true;
+  v.srcObject = s;
+  try { await deadline(v.play(), 5000, 'video'); }
+  catch (e) { s.getTracks().forEach((t) => t.stop()); e.noFrames = true; throw e; }
+  return { s, v };
+}
+
+// onError(msg, { fatal }): fatal means eye tracking has stopped and needs a person (camera blocked,
+// no camera, model would not load). Anything else is a message; tracking carries on or recovers.
 export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace, onError,
-  onCalibrationProgress, confirmMs = BLINK_DEFAULTS.confirmMs }) {
+  onRecovered, onCalibrationProgress, confirmMs = BLINK_DEFAULTS.confirmMs }) {
   let landmarker = null, video = null, stream = null, backend = '?';
   let camera = null, irisPx = 0;
   let running = false, calibrating = false, cancelled = false;
@@ -210,13 +244,79 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
   let lastRaw = null;         // the unsmoothed feature vector — the signal check reads this
   let lastFrameAt = 0, detectFails = 0, stallTimer = null;
   let lastLid = 0;            // reject frames where he blinked: they carry no gaze at all
+  let session = 0;            // bumped by stop(): a camera restart still in flight must not revive it
+  let recovering = false;
+
+  // A background tab gets no animation frames, so no camera frames are read. That is not a dead
+  // camera: restart the stall clock when he comes back, or the first check fires on the old time.
+  const onVisible = () => { if (!document.hidden) lastFrameAt = performance.now(); };
 
   function teardown() {
     running = false;
+    recovering = false;
+    session++;
     clearInterval(stallTimer);
+    document.removeEventListener('visibilitychange', onVisible);
     stream?.getTracks().forEach((t) => t.stop());
     video?.remove();
     video = stream = null;
+  }
+
+  /** Make a freshly opened camera the live one. */
+  function attach(s, v) {
+    stream = s; video = v; lastTs = -1;
+    const t = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
+    camera = { w: t.width ?? 0, h: t.height ?? 0, fps: t.frameRate ?? 0 };
+    // The track ending (unplugged, revoked, grabbed by another app) is recoverable too: it may
+    // come back, and he has no hands to turn eye tracking off and on.
+    const mine = stream;
+    stream.getVideoTracks()[0]?.addEventListener('ended', () => {
+      if (mine === stream) recover('The camera was disconnected.');
+    });
+  }
+
+  /**
+   * THE CAMERA HICCUPPED. A stall, a dropped track or a run of failed frames used to switch eye
+   * tracking off for good while the setting still said Eyes, and he had no input at all until
+   * someone noticed. Now: show the dot as lost, keep the calibrated map, and reopen the camera with
+   * backoff until it comes back. Only a blocked camera (a permission, which needs a person) stops.
+   */
+  async function recover(why) {
+    if (!running || recovering) return;
+    recovering = true;
+    const mine = session;
+    onFace(false);
+    gate.reset(); preBlink = null; lastOut = null;
+    onError(`${why} Restarting the camera...`, { fatal: false });
+    stream?.getTracks().forEach((t) => t.stop());
+    video?.remove();
+    video = stream = null;              // loop() idles until the new camera is up
+    for (let attempt = 0; ; attempt++) {
+      await sleep(Math.min(15000, 1000 * 2 ** attempt));
+      if (mine !== session) return;     // stopped while we waited
+      try {
+        if (!landmarker) await deadline(load(), 25000, 'face model');
+        const { s, v } = await openCamera();
+        if (mine !== session) { s.getTracks().forEach((t) => t.stop()); return; }
+        attach(s, v);
+        lastF = null; fsm = null;
+        median = makeMedian();
+        fixate = makeFixation();
+        detectFails = 0;
+        lastFrameAt = performance.now();
+        recovering = false;
+        onRecovered?.();
+        return;
+      } catch (e) {
+        if (mine !== session) return;
+        if (e.name === 'NotAllowedError') {
+          recovering = false;
+          onError('Camera blocked. Allow it in the address bar, then choose Eyes again in Settings.', { fatal: true });
+          return;
+        }
+        // Anything else (no camera yet, still busy, timed out): try again, a little later each time.
+      }
+    }
   }
 
   async function load() {
@@ -251,16 +351,20 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     if (!running) return;
     requestAnimationFrame(loop);
 
-    if (video.readyState < 2 || video.currentTime === lastTs) return;
+    if (!video || recovering || video.readyState < 2 || video.currentTime === lastTs) return;
     lastTs = video.currentTime;
     lastFrameAt = performance.now();       // for the stall watchdog
 
     let out;
     try { out = landmarker.detectForVideo(video, performance.now()); detectFails = 0; }
     catch {
-      // A camera that throws every frame would freeze the dot silently. Count the failures and
-      // surface it rather than leaving him staring at a dead cursor.
-      if (++detectFails === 30) onError('Eye tracking stopped — turn the camera off and on again.');
+      // A camera that throws every frame would freeze the dot silently. After a run of failures,
+      // reload the face model and reopen the camera rather than leave him staring at a dead cursor.
+      if (++detectFails === 30) {
+        try { landmarker?.close?.(); } catch {}
+        landmarker = null;
+        recover('Eye tracking stopped reading the camera.');
+      }
       return;
     }
 
@@ -333,59 +437,37 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
     get backend() { return backend; },
 
     async start() {
-      // getUserMedia can hang forever — no camera, or one another app is holding. A promise that
-      // never settles means no error, no toast, and a user tapping a button that says nothing
-      // back. Every await here gets a deadline.
-      const deadline = (p, ms, what) => Promise.race([
-        p,
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out`)), ms)),
-      ]);
-
-      try {
-        // 640x480 leaves the iris about ten pixels across at laptop distance — the landmark then
-        // quantises to that grid and the jitter IS the signal. Ask for everything the camera has.
-        stream = await deadline(
-          navigator.mediaDevices.getUserMedia({
-            video: {
-              width: { ideal: 1280, min: 640 },
-              height: { ideal: 720, min: 480 },
-              frameRate: { ideal: 30 },
-              facingMode: 'user',
-            },
-          }),
-          12000, 'camera',
-        );
-      } catch (e) {
+      // Starting is the one place a failure is final: nothing was working yet, and a person has to
+      // fix it (allow the camera, plug one in). Once running, hiccups recover on their own.
+      const mine = session;
+      let cam;
+      try { cam = await openCamera(); }
+      catch (e) {
         onError(e.name === 'NotAllowedError'
-          ? 'Camera blocked. Allow it in the address bar, then turn Eye tracking back on.'
+          ? 'Camera blocked. Allow it in the address bar, then choose Eyes again in Settings.'
           : e.name === 'NotFoundError' ? 'No camera found on this machine.'
-          : `Camera: ${e.message}`);
+          : e.noFrames ? `Camera opened but no frames: ${e.message}`
+          : `Camera: ${e.message}`, { fatal: true });
         return false;
       }
-
-      video = document.createElement('video');
-      video.autoplay = true; video.playsInline = true; video.muted = true;
-      video.srcObject = stream;
-      try { await deadline(video.play(), 5000, 'video'); }
-      catch (e) { onError(`Camera opened but no frames: ${e.message}`); teardown(); return false; }
+      if (mine !== session) { cam.s.getTracks().forEach((t) => t.stop()); return false; }
+      attach(cam.s, cam.v);
 
       try { if (!landmarker) await deadline(load(), 25000, 'face model'); }
-      catch (e) { onError(`Eye tracking unavailable — ${e.message}`); teardown(); return false; }
-
-      const t = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
-      camera = { w: t.width ?? 0, h: t.height ?? 0, fps: t.frameRate ?? 0 };
-
-      // The camera track ending (unplugged, revoked, grabbed by another app) is a hard failure.
-      stream.getVideoTracks()[0]?.addEventListener('ended', () => onError('The camera was disconnected.'));
+      catch (e) { onError(`Eye tracking unavailable — ${e.message}`, { fatal: true }); teardown(); return false; }
+      if (mine !== session) return false;
 
       running = true;
       lastFrameAt = performance.now();
-      // Liveness watchdog: if frames stop arriving for ~2s while we think we are running, say so.
+      document.addEventListener('visibilitychange', onVisible);
+      // Liveness watchdog: if frames stop arriving for ~2s while the page is in front, reopen the
+      // camera. A hidden tab is skipped: it gets no frames by design.
       clearInterval(stallTimer);
       stallTimer = setInterval(() => {
-        if (running && performance.now() - lastFrameAt > 2000) {
-          onFace(false);
-          onError('Camera stopped sending frames — check it is not covered or in use elsewhere.');
+        if (!running || recovering) return;
+        if (document.hidden) { lastFrameAt = performance.now(); return; }
+        if (performance.now() - lastFrameAt > 2000) {
+          recover('Camera stopped sending frames. Check it is not covered or in use elsewhere.');
         }
       }, 1000);
 
@@ -460,11 +542,11 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
         }
         const moving = frames.slice(pursuitFrom).filter((fr) => ok(fr) && fr.t >= timeline[0].t + 400 && fr.t <= timeline.at(-1).t);
         if (still.length < 60 || moving.length < 200) {
-          onError('Calibration failed: your face was not visible enough. More light, sit closer.');
+          onError('Calibration failed: your face was not visible enough. More light, sit closer.', { fatal: false });
           return false;
         }
 
-        const cw = video.videoWidth || camera.w, ch = video.videoHeight || camera.h;
+        const cw = video?.videoWidth || camera.w, ch = video?.videoHeight || camera.h;   // video is null mid-restart
         const ref = makeReference([...still.map((s) => s.fr.lm), ...moving.map((m) => m.lm)], cw, ch);
         const rawOf = (lm) => rawFeatures(lm, cw, ch, ref);
         const stillRaw = still.map((s) => rawOf(s.fr.lm)), movingRaw = moving.map((m) => rawOf(m.lm));
