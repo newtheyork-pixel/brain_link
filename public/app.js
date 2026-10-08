@@ -87,12 +87,27 @@ const bus = {
 
 /**
  * Everything the cursor can land on: the tiles, then Say it and Urgent, then Undo, Wait and Mode.
- * The last three come after Urgent so the common path costs a blink user no extra steps, and only
- * appear when they would do something (Undo needs a word; Mode would wipe a half-built sentence).
+ * The last three come after Urgent so the common path costs a blink user no extra steps. Say it,
+ * Undo and Mode only appear when they would do something (Say it and Undo need a word; Mode would
+ * wipe a half-built sentence), so a blink user never spends a step on a dead button.
  */
-const zones = () => [...state.tiles, SAY, URGENT,
+const zones = () => [...state.tiles,
+  ...(!state.urgent && state.selected.length ? [SAY] : []), URGENT,
   ...(!state.urgent && state.selected.length ? [UNDO] : []), HOLD,
   ...(!state.urgent && !state.selected.length ? [MODE] : [])];
+
+// The cursor is an index into zones(), and which zones exist depends on his words. So every change
+// to state.selected shifts the buttons after the tiles: undoing the last word turned a highlighted
+// Undo into Wait, and the next long blink said "Wait" out loud. This keeps the highlight on the
+// same zone, or on nothing in Blinks mode if that zone is gone, and redraws at once so the
+// highlight and what SELECT fires never disagree.
+function changeSelected(change) {
+  const was = zones()[state.cursor];
+  change();
+  const i = was === undefined ? -1 : zones().indexOf(was);
+  state.cursor = state.driver === 'blink' ? i : Math.max(0, i);
+  renderGrid();
+}
 const ZONE_ACT = { [SAY]: () => compose(), [URGENT]: () => toggleUrgent(), [UNDO]: () => undo(),
   [HOLD]: () => sayWait(), [MODE]: () => cycleMode() };
 
@@ -216,7 +231,7 @@ async function pick(tile) {
     return;
   }
 
-  state.selected.push(tile);
+  changeSelected(() => state.selected.push(tile));
   state.selections++;
   renderSelected();
   renderHUD();
@@ -229,7 +244,7 @@ function undo() {
   if (state.composing) return;   // the words are with the model; see pick()
   retractIfRecent();   // he's correcting a pick — don't let the map learn the mistake
   if (!state.selected.length) return;
-  state.selected.pop();
+  changeSelected(() => state.selected.pop());
   renderSelected();
   loadTiles();
 }
@@ -285,7 +300,13 @@ async function toggleUrgent() {
     state.urgent = false;
     document.body.classList.remove('in-urgent');
     $('#urgent').textContent = 'Urgent';
+    // Clear the urgent words now, as the way in does. Left on screen until the new words came
+    // back, they looked urgent but picked like normal words: "suction" went quietly into his
+    // half-built sentence instead of being said at once.
+    state.tiles = [];
+    state.cursor = state.driver === 'blink' ? -1 : 0;
     renderControls();
+    renderGrid();
     await loadTiles();
     return;
   }
@@ -366,6 +387,7 @@ function setMode(mode) {
     b.setAttribute('aria-selected', String(m === mode));
   }
   $('#partner-block').hidden = mode !== 'answer';
+  document.body.classList.toggle('partner-off', mode !== 'answer');   // keeps the top band (style.css)
   if (!state.composing) $('#compose').textContent = COMPOSE_LABEL[mode];
   $('#mode-eye').textContent = `Mode: ${MODE_NAME[mode]}`;
   renderSelected();
@@ -431,7 +453,7 @@ function renderSheetHint() {
   $('#sheet-hint').textContent = state.driver === 'blink'
     ? 'Blink firmly to move to the next one. Close your eyes until the beep to say it.'
     : state.confirmBy === 'dwell'
-      ? 'Look at one and keep looking to say it, or close your eyes until the beep.'
+      ? `Look at one and keep looking for ${(sheetDwellMs() / 1000).toFixed(1)} seconds to say it, or close your eyes until the beep.`
       : 'Look at one, then close your eyes until the beep to say it.';
 }
 
@@ -599,7 +621,7 @@ function logUtterance(text, startedAt, instant, selections) {
 }
 
 function reset() {
-  state.selected = [];
+  changeSelected(() => { state.selected = []; });
   state.selections = 0;
   state.startedAt = null;
   renderSelected();
@@ -824,6 +846,9 @@ function trackControl(ctrl, locked) {
 // Gaze-dwell over the numbered sentence options. Bigger, forgiving targets — there are only a
 // few, stacked vertically, so vertical (the weak gaze axis) does the least work.
 let sheetDwellIdx = -1, sheetDwellStart = 0;
+// A sentence takes longer to read than a one-word tile. With the tile dwell (0.9 s) just reading
+// option 1 said it, so the sheet needs at least twice as long and never less than 2 s.
+const sheetDwellMs = () => Math.max(2 * state.dwellMs, 2000);
 function dwellOverSheet(x, y, locked) {
   const opts = sheetOptions();
   let hit = -1;
@@ -849,7 +874,7 @@ function dwellOverSheet(x, y, locked) {
   // just arms it — he still has to blink — so merely READING the options never speaks one.
   if (state.confirmBy !== 'dwell') return;
   if (!locked) { sheetDwellStart = performance.now(); return; }
-  const frac = Math.min(1, (performance.now() - sheetDwellStart) / state.dwellMs);
+  const frac = Math.min(1, (performance.now() - sheetDwellStart) / sheetDwellMs());
   opts[hit].style.setProperty('--dwell', String(frac));
   if (frac >= 1) {
     sheetDwellIdx = -1;
@@ -1025,7 +1050,10 @@ function blinkFeedback(result, el = null, held = 0) {
     return;
   }
   flash(dot ?? el, 'pip-no', 350);
-  if (el && held >= state.blinkMs * 0.75 && held < state.blinkMs) flash(el, 'too-short', 1200);
+  // Only for a closure longer than any natural blink: a 280 ms blink is him blinking, not a try.
+  if (el && held >= Math.max(NATURAL_BLINK_MAX_MS, state.blinkMs * 0.75) && held < state.blinkMs) {
+    flash(el, 'too-short', 1200);
+  }
 }
 
 // THE EYE STATUS CHIP (camera modes). faceSeen: null until the camera's first frame, then whether
@@ -1067,6 +1095,115 @@ function retractIfRecent() {
   }
 }
 
+// Natural blinks measured 83-292 ms (2026-10-08 recording). In Eyes mode a 'short' blink under
+// this is just him blinking: it gets no grey pip and no "longer" label, or the app would flicker
+// and scold every ordinary blink on camera.
+const NATURAL_BLINK_MAX_MS = 300;
+
+// Blinks driver: would SELECT on the highlighted zone actually do something? A long blink that
+// does nothing must not flash gold, or he is told it was said when it was not.
+function zoneActs(z, el) {
+  if (z === undefined || !el || el.disabled) return false;
+  if (z === URGENT) return true;                                  // never blocked
+  if (z === HOLD) return !state.speaking;                         // say() waits its turn
+  if (z === UNDO) return !state.composing;                        // see undo()
+  if (z === MODE) return !state.selected.length && !state.urgent; // see cycleMode()
+  if (z === SAY) return true;                                     // disabled covers it
+  return state.urgent || (!state.speaking && !state.composing);   // a word: see pick()
+}
+
+/**
+ * One finished blink. Returns what it did, for the blink log: the outcome names the branch, so
+ * "blink to confirm does nothing" can be read off data/gaze.jsonl.
+ * kind (blinkgate.js): 'reflex' < 120 ms, 'short', 'long' >= blink length, 'rest' > 3 s.
+ */
+function onBlink(kind, held) {
+  const snap = blinkTarget;
+  // A quick blink can come just before the long one, inside the same lid movement (the gaze is
+  // still frozen). Keep the snapshot for that; a long blink or a rest uses it up.
+  if (kind === 'long' || kind === 'rest') blinkTarget = null;
+  $$('.ready').forEach((e) => e.classList.remove('ready'));
+  if (!$('#calib').hidden || gazeTesting) return 'calibrating';   // never during calibration or the test
+  if (kind === 'reflex') return 'reflex';                          // a natural blink: nothing to say
+  const long = kind === 'long';
+
+  // BLINKS DRIVER: every blink is a command, so a natural one must do nothing, in the sheet as
+  // on the grid. Only a blink clearly longer than an ordinary one steps; only one as long as his
+  // Blink length selects (blinkscan.js). Natural blinks often come in pairs, so the second
+  // blink inside BLINK_REFRACTORY_MS of an acted one is dropped too.
+  if (state.driver === 'blink') {
+    const act = blinkAction(kind, held, state.blinkMs);
+    if (!act) return 'natural';
+    if (performance.now() - lastBlinkActAt < BLINK_REFRACTORY_MS) { blinkFeedback('ignored'); return 'ignored-refractory'; }
+    lastBlinkActAt = performance.now();
+  } else if (kind === 'short' && held < NATURAL_BLINK_MAX_MS) {
+    return 'natural';
+  }
+
+  // The sentence sheet. In Blinks mode a quick blink steps to the next numbered option; in Eyes
+  // mode his gaze does that, and a stray natural blink must not move the highlight under him.
+  // A long blink says the option that was highlighted when his lids started to close.
+  if (!$('#confirm').hidden) {
+    if (kind === 'short' && state.driver === 'blink') { sheetNext(); blinkFeedback('seen'); return 'sheet-step'; }
+    // Blinks mode: only blinks move the highlight, so the live one is the one he saw.
+    const t = state.driver === 'blink'
+      ? { sheet: sheetArmed && sheetIdx >= 0 ? { idx: sheetIdx, gen: sheetGen } : null } : snap;
+    const el = blinkTargetEl(t);
+    if (long && t?.sheet && el) {
+      sheetIdx = t.sheet.idx;
+      sheetArmed = true;
+      blinkFeedback('fired', el);
+      sheetConfirm();
+      return 'fired-sheet';
+    }
+    blinkFeedback('ignored', el ?? sheetOptions()[sheetIdx], held);
+    return long ? 'ignored-sheet-no-target' : 'too-short';
+  }
+
+  // BLINK DRIVER: he selects entirely by blinking, no gaze pointing. Quick blink steps the
+  // cursor to the next tile; held blink selects it (single-switch scanning, eyelid as switch).
+  // Blinks are NOT blocked during speech: he must be able to reach and fire URGENT mid-sentence.
+  // A new grid has nothing highlighted, so a long blink before his first step selects nothing.
+  if (state.driver === 'blink') {
+    if (kind === 'short') { blinkStep(); blinkFeedback('seen'); return 'step'; }
+    const z = zones()[state.cursor];
+    const el = z === undefined ? null : ZONE_EL[z] ? $(ZONE_EL[z]) : $$('.tile')[state.cursor];
+    if (!long) { blinkFeedback('ignored', el, held); return 'ignored-rest'; }
+    if (!zoneActs(z, el)) { blinkFeedback('ignored', el, held); return z === undefined ? 'ignored-no-target' : 'ignored-cannot-act'; }
+    blinkFeedback('fired', el);
+    bus.emit('SELECT');
+    return ZONE_EL[z] ? 'fired-control' : 'fired-tile';
+  }
+
+  // EYES DRIVER: he LOOKS at a tile (it arms while his eye is LOCKED on it), then closes his
+  // eyes until the beep to say it. Only the snapshot fires: never a tile his eye merely passed
+  // over, never one the closing lids dragged the dot onto. Same in dwell mode, where a long
+  // blink is a second way to say the tile that is filling.
+  const el = blinkTargetEl(snap);
+  // Just committed: ignore blinks for a beat, so one deliberate blink can't fire twice.
+  if (!long || !el || performance.now() - lastCommitAt < 700) {
+    blinkFeedback('ignored', el, held);
+    return !long ? (kind === 'rest' ? 'ignored-rest' : 'too-short')
+      : !el ? 'ignored-no-target' : 'ignored-cooldown';
+  }
+
+  // An armed action button (Say it, Urgent, Undo, Wait, Mode): an eyes-only user can reach
+  // every zone. While a sentence plays only Urgent can be armed (onGazePoint), so this is safe.
+  if (snap.control) {
+    blinkFeedback('fired', el);
+    fireControl(snap.control);
+    return 'fired-control';
+  }
+  // In the urgent grid a blink fires even mid-sentence: pick() interrupts the audio for it.
+  if (snap.tile && ((!state.speaking && !state.composing) || state.urgent)) {
+    blinkFeedback('fired', el);
+    commitGazeTile(snap.tile.i, snap.pre);
+    return 'fired-tile';
+  }
+  blinkFeedback('ignored', el, held);
+  return state.composing ? 'ignored-composing' : 'ignored-speaking';
+}
+
 async function startGaze() {
   if (gaze) return;
   faceSeen = null; showLids(false); renderEyeStatus();   // "Starting" until the first camera frame
@@ -1084,83 +1221,15 @@ async function startGaze() {
         : sheetOpen ? (sheetArmed && sheetIdx >= 0 ? sheetOptions()[sheetIdx] : null)
         : $('.tile.cursor, .actions > button.cursor');
       if (!el) return;
+      // Blinks mode: no beep on a zone that cannot act right now (a word while speaking, say).
+      if (state.driver === 'blink' && !sheetOpen && !zoneActs(zones()[state.cursor], el)) return;
       beep(990, 0.07, 0.05);
       el.classList.add('ready');
     },
     // kind (blinkgate.js): 'reflex' < 120 ms, 'short', 'long' >= blink length, 'rest' > 3 s.
-    onBlink: (kind, held) => {
-      const snap = blinkTarget;
-      // A quick blink can come just before the long one, inside the same lid movement (the gaze is
-      // still frozen). Keep the snapshot for that; a long blink or a rest uses it up.
-      if (kind === 'long' || kind === 'rest') blinkTarget = null;
-      $$('.ready').forEach((e) => e.classList.remove('ready'));
-      if (!$('#calib').hidden || gazeTesting) return;  // never during calibration or the test
-      if (kind === 'reflex') return;                   // a natural blink: nothing to say about it
-      const long = kind === 'long';
-
-      // BLINKS DRIVER: every blink is a command, so a natural one must do nothing, in the sheet as
-      // on the grid. Only a blink clearly longer than an ordinary one steps; only one as long as his
-      // Blink length selects (blinkscan.js). Natural blinks often come in pairs, so the second
-      // blink inside BLINK_REFRACTORY_MS of an acted one is dropped too.
-      if (state.driver === 'blink') {
-        const act = blinkAction(kind, held, state.blinkMs);
-        if (!act) return;
-        if (performance.now() - lastBlinkActAt < BLINK_REFRACTORY_MS) return blinkFeedback('ignored');
-        lastBlinkActAt = performance.now();
-      }
-
-      // The sentence sheet. In Blinks mode a quick blink steps to the next numbered option; in Eyes
-      // mode his gaze does that, and a stray natural blink must not move the highlight under him.
-      // A long blink says the option that was highlighted when his lids started to close.
-      if (!$('#confirm').hidden) {
-        if (kind === 'short' && state.driver === 'blink') { sheetNext(); return blinkFeedback('seen'); }
-        // Blinks mode: only blinks move the highlight, so the live one is the one he saw.
-        const t = state.driver === 'blink'
-          ? { sheet: sheetArmed && sheetIdx >= 0 ? { idx: sheetIdx, gen: sheetGen } : null } : snap;
-        const el = blinkTargetEl(t);
-        if (long && t?.sheet && el) {
-          sheetIdx = t.sheet.idx;
-          sheetArmed = true;
-          blinkFeedback('fired', el);
-          return sheetConfirm();
-        }
-        return blinkFeedback('ignored', el ?? sheetOptions()[sheetIdx], held);
-      }
-
-      // BLINK DRIVER: he selects entirely by blinking, no gaze pointing. Quick blink steps the
-      // cursor to the next tile; held blink selects it (single-switch scanning, eyelid as switch).
-      // Blinks are NOT blocked during speech — he must be able to reach and fire URGENT mid-sentence.
-      // A new grid has nothing highlighted, so a long blink before his first step selects nothing.
-      if (state.driver === 'blink') {
-        const el = $('.tile.cursor, .actions > button.cursor');
-        if (kind === 'short') { blinkStep(); return blinkFeedback('seen'); }
-        // A word while Say it is building does nothing (pick()), so it must not flash as said.
-        if (long && state.composing && el?.classList.contains('tile')) return blinkFeedback('ignored', el, held);
-        if (long) { blinkFeedback('fired', el); return bus.emit('SELECT'); }
-        return blinkFeedback('ignored', el, held);
-      }
-
-      // EYES DRIVER: he LOOKS at a tile (it arms while his eye is LOCKED on it), then closes his
-      // eyes until the beep to say it. Only the snapshot fires: never a tile his eye merely passed
-      // over, never one the closing lids dragged the dot onto. Same in dwell mode, where a long
-      // blink is a second way to say the tile that is filling.
-      const el = blinkTargetEl(snap);
-      // Just committed: ignore blinks for a beat, so one deliberate blink can't fire twice.
-      if (!long || !el || performance.now() - lastCommitAt < 700) return blinkFeedback('ignored', el, held);
-
-      // An armed action button (Say it, Urgent, Undo, Wait, Mode): an eyes-only user can reach
-      // every zone. While a sentence plays only Urgent can be armed (onGazePoint), so this is safe.
-      if (snap.control) {
-        blinkFeedback('fired', el);
-        return fireControl(snap.control);
-      }
-      // In the urgent grid a blink fires even mid-sentence: pick() interrupts the audio for it.
-      if (snap.tile && ((!state.speaking && !state.composing) || state.urgent)) {
-        blinkFeedback('fired', el);
-        return commitGazeTile(snap.tile.i, snap.pre);
-      }
-      blinkFeedback('ignored', el, held);
-    },
+    // Every blink is logged with the branch that handled it (logBlink), so a blink that "did
+    // nothing" in the field leaves a reason on disk.
+    onBlink: (kind, held) => logBlink(kind, held, onBlink(kind, held)),
     onLids: showLids,
     onFace: (found) => {
       $('#gaze-dot').classList.toggle('lost', !found);
@@ -1545,6 +1614,9 @@ async function runGazeAccuracy(g, live) {
   // He sees the live grid the whole time, so the progress goes in a chip over it. Inside #calib
   // (hidden for the test) it was never seen.
   const chip = $('#test-chip');
+  // The toast sits in the same top strip ("Calibrated. Now run the test." is often still up).
+  clearTimeout(toastTimer);
+  $('#toast').hidden = true;
   chip.hidden = false;
   const n = $$('.tile').length;
   const results = [];
@@ -1603,7 +1675,8 @@ async function runGazeAccuracy(g, live) {
 
   const hits = results.filter((r) => r.hit).length;
   const pct = Math.round((hits / results.length) * 100);
-  const msg = `Hit ${hits} of ${results.length}. After bias correction: ${hitsDebiased} of ${withPos.length}.`;
+  // Plain words out loud. The raw and bias-corrected numbers stay in #gaze-state and the log.
+  const msg = `You hit ${hits} of ${results.length} words.`;
   toast(msg, 'info');
   speakPrompt(msg);
   $('#gaze-state').textContent =
@@ -1834,7 +1907,8 @@ $('#calibrate').onclick = async () => {
   pursuitCued = false;
   speakPrompt('Look at each dot, then follow the moving one with your eyes.');
   try {
-    await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} good frames`; } });
+    // The bar shows the progress. A frame count ("412 good frames") meant nothing to him or a viewer.
+    await gaze.calibrate({ bounds, onSample: () => { $('#calib-count').textContent = 'Keep following the dot'; } });
   } catch (e) {
     // A throw used to leave him stranded on a full-screen black overlay with no way out.
     // Too few good frames lands here too, with the camera still on, so he can press Calibrate

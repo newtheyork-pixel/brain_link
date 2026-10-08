@@ -102,8 +102,11 @@ button.ghost { background: transparent; color: var(--muted); border: 1px solid v
   border-radius: 10px; padding: 11px 20px; font-size: 15px; cursor: pointer; }
 
 .sheet { position: fixed; inset: 0; background: rgba(10,12,16,.94); z-index: 20;
-  display: flex; flex-direction: column; justify-content: center; align-items: center;
-  gap: 14px; padding: 24px; }
+  display: flex; flex-direction: column; justify-content: safe center; align-items: center;
+  gap: 14px; padding: 24px; overflow-y: auto; }
+/* "safe center" and the scroll: on a short screen (768p with browser bars) a full sheet is taller
+   than the window, and plain centering cut the title and Urgent off both ends with no way to reach
+   them. Now it starts at the top and scrolls. */
 .sheet[hidden] { display: none; }
 .sheet h2 { margin: 0; font-size: 26px; }
 .sheet-note { margin: 0; color: var(--muted); font-size: 15px; }
@@ -282,6 +285,12 @@ body.gaze-mode .spoken { padding: 8px 22px; font-size: 20px; }
 /* Both at once: the toast goes under the caption, so a "voice failed" note does not hide what he
    said. Brief, and only while the caption is up. */
 body.gaze-mode .spoken:not([hidden]) ~ .toast { top: 60px; }
+/* Ask and Say hide the partner row, so the grid used to start at the top of the page and the
+   caption, the toasts, the eye status chip and the gear all sat on the top row of words. In those
+   modes the page keeps an empty band of the same height at the top for them instead. The band has
+   room for one line, so a toast there sits over the caption rather than over a word. */
+body.gaze-mode.partner-off { padding-top: 58px; }
+body.gaze-mode.partner-off .spoken:not([hidden]) ~ .toast { top: 6px; }
 /* The Blinks help line is up the whole time, so it cannot sit over the partner's question (he could
    not read the end of what he was answering) or over the tiles. It gets its own row at the bottom,
    in the page flow, where it covers nothing. */
