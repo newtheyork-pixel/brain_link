@@ -1334,3 +1334,21 @@ async function boot() {
   }
 }
 boot();
+
+/* ---------- blink telemetry ---------- */
+
+// "Blink to confirm doesn't work" left no trace: nothing on disk said whether his blinks were
+// seen, too short, or dropped by a guard (cooldown, no armed tile, speaking). onBlink calls this
+// once per blink with the branch that ran, and the row lands in data/gaze.jsonl next to the
+// calibration rows. `extra` carries anything the caller has, such as the lid peak.
+function logBlink(blinkKind, held, outcome, extra = {}) {
+  fetch('/api/gazelog', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      kind: 'blink', blink: blinkKind, held: Math.round(held), outcome,
+      driver: state.driver, confirmBy: state.confirmBy, armedTile, armedControl,
+      speaking: state.speaking, sheetOpen: !$('#confirm').hidden,
+      sinceCommit: Math.round(performance.now() - lastCommitAt), ...extra,
+    }),
+  }).catch(() => {});
+}

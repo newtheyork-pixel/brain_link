@@ -31,14 +31,37 @@ const crop = document.createElement('canvas');
 crop.width = CROP_W; crop.height = CROP_H;
 const cctx = crop.getContext('2d', { willReadFrequently: true });
 
-async function flush() {
+// fetch() only throws on a network error. A 500 (disk full, no permission on data/recordings)
+// resolves normally, and the chunk used to vanish while the page still said "frames saved".
+// Now: a 5xx or network error keeps the chunk for the next try, a 4xx is counted as lost (it would
+// fail the same way forever), and the screen says when saving is failing.
+const MAX_PENDING = 300;   // ~4 MB of frames; past this the oldest are dropped, not re-sent forever
+let lost = 0, saveErr = '', flushing = null;
+
+function flush() {
+  // One at a time, so a retried chunk can never land after the frames that came behind it.
+  if (!flushing) flushing = sendChunk().finally(() => { flushing = null; });
+  return flushing;
+}
+
+async function sendChunk() {
   if (!buf.length) return;
   const lines = buf; buf = [];
+  let retry = false;
   try {
-    await fetch('/api/gazerec', { method: 'POST', headers: { 'content-type': 'application/json' },
+    const res = await fetch('/api/gazerec', { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: ID, lines }) });
-  } catch { buf = lines.concat(buf); }   // server hiccup: keep it and retry on the next flush
+    if (res.ok) { saveErr = ''; return; }
+    saveErr = `server ${res.status}`;
+    if (res.status >= 500) retry = true; else lost += lines.length;
+  } catch (e) { saveErr = 'server unreachable'; retry = true; }
+  if (retry) {
+    buf = lines.concat(buf);
+    if (buf.length > MAX_PENDING) { lost += buf.length - MAX_PENDING; buf = buf.slice(-MAX_PENDING); }
+  }
 }
+
+const saveNote = () => (saveErr || lost ? ` · SAVE FAILING (${saveErr || 'error'}), ${lost} frames lost, ${buf.length} waiting` : '');
 
 function eyeCrop(lm, idx) {
   const W = video.videoWidth, H = video.videoHeight;
@@ -89,7 +112,7 @@ function onFrame() {
     eL: L.img, eR: R.img, bL: L.box, bR: R.box,
   });
   frames++;
-  $('#status').textContent = `${frames} frames`;
+  $('#status').textContent = `${frames} frames${saveNote()}`;
   if (buf.length >= 60) flush();
 }
 
@@ -201,11 +224,18 @@ async function finish() {
   if (stopped) return;
   stopped = true; phase = 'idle'; hide();
   buf.push({ k: 'end', frames, at: new Date().toISOString() });
-  await flush();
+  // Nothing calls flush() after this, so retry here, and only claim "saved" if it was.
+  for (let i = 0; i < 4 && (buf.length || flushing); i++) {
+    if (i) await sleep(1000);
+    await flush();
+  }
   try { await document.exitFullscreen(); } catch {}
   document.body.style.cursor = 'default';
   const m = $('#msg');
-  m.innerHTML = `<strong>Done. ${frames} frames saved.</strong><small>data/recordings/${ID}.jsonl. You can close this tab.</small>`;
+  const unsaved = lost + buf.length;
+  m.innerHTML = unsaved
+    ? `<strong>Done, but ${unsaved} frames were NOT saved (${saveErr || 'server error'}).</strong><small>The rest is in data/recordings/${ID}.jsonl.</small>`
+    : `<strong>Done. ${frames} frames saved.</strong><small>data/recordings/${ID}.jsonl. You can close this tab.</small>`;
   m.style.display = 'flex';
   video?.srcObject?.getTracks().forEach((t) => t.stop());
 }
