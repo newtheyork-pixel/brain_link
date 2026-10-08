@@ -21,12 +21,12 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
 // How long the eyes must stay shut to say the armed word. Natural blinks on the 2026-10-08
-// recording measured 83-292 ms shut (eval/gaze/blink.mjs), so 350 ms is clearly deliberate but
+// recording measured 83-292 ms shut (eval/gaze/blink.mjs), so 400 ms is clearly deliberate but
 // still easy. A caregiver can move it (Settings, Blink length); it is remembered on this device.
 const BLINK_MS_KEY = 'stillme.blinkMs';
 const loadBlinkMs = () => {
-  try { const v = +localStorage.getItem(BLINK_MS_KEY); return v >= 250 && v <= 1200 ? v : 350; }
-  catch { return 350; }
+  try { const v = +localStorage.getItem(BLINK_MS_KEY); return v >= 300 && v <= 1200 ? v : 400; }
+  catch { return 400; }
 };
 // Look-then-blink or look-and-hold. A caregiver picks it once for him; it must survive a reload,
 // or the fallback for a man who cannot hold a blink silently turns itself off every morning.

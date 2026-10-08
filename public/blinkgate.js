@@ -30,13 +30,16 @@ export const BLINK_DEFAULTS = {
   shutOn: 0.25,     // Shut: both-eye mean this far above his open level.
   shutOff: 0.20,    // Open again below this (hysteresis: a dip mid-blink must not split it).
   shutRiseMs: 250,  // Shut must follow a FAST rise this recently. Lids creeping up as he leans in
-                    //   or looks down are never a blink, however high they get.
+                    //   or looks down are never a blink, however high they get...
+  deep: 0.35,       // ...unless they get this far above his open level: that is a closed eye, not a
+  deepMs: 120,      //   glance down, held this long. "Close your eyes till the beep" invites a SLOW,
+                    //   gentle close, and the fast-rise rule alone never counted one.
   baseWin: 1500,    // ms of recent open-eye frames his open level is taken from...
   basePct: 0.2,     // ...as a low percentile, so it drops at once when he reopens, rises slowly.
   steadyMs: 250,    // A lid that stops moving at a new height for this long is a new posture
   steadyRange: 0.04, //   (looking down, slumping), not a blink. Let go and adopt it.
   shortMin: 120,    // Under this a closure is a reflex: seen, never acted on.
-  confirmMs: 350,   // A closure this long or longer is a deliberate "say it".
+  confirmMs: 400,   // A closure this long or longer is a deliberate "say it".
   restMs: 3000,     // Longer than this he is resting his eyes, not asking for anything.
 };
 
@@ -48,6 +51,8 @@ export function makeBlinkGate(opts = {}) {
   let shut = false, shutAt = 0, heldFired = false, shutBase = 0;
   let backSince = -1;     // when the lids got back near the pre-blink level (for settle)
   let lastRiseAt = -Infinity;
+  let deepSince = -1;     // when the lids first sat `deep` above his open level in this gate
+  let entryBefore = 0;    // lowest both-eye lid in the 150 ms before the gate closed
 
   const openLevel = () => {
     if (!openBuf.length) return null;
@@ -83,6 +88,9 @@ export function makeBlinkGate(opts = {}) {
     if (!gated && (rising || high)) {
       gated = true; gateAt = t; base = b; backSince = -1;
       preLid = pre ? Math.min(pre[1], m) : m;
+      entryBefore = Infinity;
+      for (const r of recent) if (r[0] >= t - 150 && r[0] < t) entryBefore = Math.min(entryBefore, r[2]);
+      if (entryBefore === Infinity) entryBefore = b;
       out.entered = true;
     }
     // Shut is judged against where the lids were just BEFORE this closure started, or his open
@@ -100,7 +108,15 @@ export function makeBlinkGate(opts = {}) {
     if (gated) {
       // Shut / open on the mean of both eyes against his own open level. One weak or drooping eye
       // can no longer veto a blink the other eye made plainly.
+      if (!shut && c - base > o.deep) { if (deepSince < 0) deepSince = t; } else if (!shut) deepSince = -1;
       if (!shut && c - shutBase > o.shutOn && t - lastRiseAt <= o.shutRiseMs) { shut = true; shutAt = t; heldFired = false; }
+      else if (!shut && deepSince >= 0 && t - deepSince >= o.deepMs) {
+        // Measured from where the lids were just before this closure, like the fast path: against
+        // the lower open level a natural blink the camera caught too coarsely to see rise fast read
+        // as a 470 ms "deliberate" one (36 fps replay).
+        shutBase = Math.max(base, entryBefore);
+        if (c - shutBase > o.shutOn) { shut = true; shutAt = t; heldFired = false; }
+      }
       else if (shut && c - shutBase < o.shutOff) {
         shut = false;
         const held = t - shutAt;
@@ -117,9 +133,9 @@ export function makeBlinkGate(opts = {}) {
         const settled = backSince >= 0 && t - backSince >= o.settle;
         // The lids stopped at a new height and stayed there: a posture change, not a blink.
         // Take it as his new open level, or the gaze would stay frozen for as long as he looks down.
-        const moved = steady(t);
+        const moved = steady(t) && c - base < o.deep;   // eyes held shut and still is not a new posture
         if (settled || moved) {
-          gated = false; out.released = true;
+          gated = false; out.released = true; deepSince = -1;
           // Back, but not down to the open level we had: his resting lid has moved. Start his open
           // level again from here, or the level test would re-trip on the very next frame.
           if (moved || c - base > o.level / 2) openBuf.length = 0;
@@ -147,7 +163,7 @@ export function makeBlinkGate(opts = {}) {
     reset() {
       recent.length = 0; openBuf.length = 0;
       gated = false; shut = false; heldFired = false; backSince = -1; base = null;
-      lastRiseAt = -Infinity;
+      lastRiseAt = -Infinity; deepSince = -1;
     },
   };
 }
