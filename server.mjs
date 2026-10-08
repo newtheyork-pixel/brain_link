@@ -178,6 +178,17 @@ const routes = {
     json(res, 200, { ok: true });
   },
 
+  // Raw eye recordings from /record.html: every frame's landmarks + eye crops + where the dot
+  // was. The tracker is tuned OFFLINE against these (eval/gaze/), not by trial on his face.
+  'POST /api/gazerec': async (req, res) => {
+    const { id, lines } = await body(req);
+    if (!/^[\w-]{1,64}$/.test(id ?? '') || !Array.isArray(lines)) return json(res, 400, { error: 'bad recording chunk' });
+    const dir = path.join(ROOT, 'data', 'recordings');
+    await mkdir(dir, { recursive: true });
+    await appendFile(path.join(dir, `${id}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    json(res, 200, { ok: true });
+  },
+
   // selections_per_sentence and seconds_to_sentence are the two numbers the paper is about.
   'POST /api/log': async (req, res) => {
     await logEvent(await body(req));

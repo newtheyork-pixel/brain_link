@@ -17,3 +17,8 @@ public/vendor/*.task
 data/profile.json
 data/*.jsonl
 !data/*.example.json
+
+# Raw eye recordings (face landmarks + eye crops) — biometric, never in the public repo.
+data/recordings/
+.venv/
+__pycache__/

@@ -777,10 +777,7 @@ async function startGaze() {
         $('#calib-bar').hidden = true;
         $('#gaze-state').textContent =
           `X ±${p.errX}px / Y ±${p.errY}px · tile ${p.tile.w}x${p.tile.h} · ${p.samples} samples · ${p.variant}`
-          + ` · head ${p.headVaried ? 'varied ✓' : 'TOO STILL'} · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
-        // If his head never moved during calibration, the model is blind to head movement and it
-        // WILL fall apart the moment he shifts in his chair. Say so.
-        if (!p.headVaried) toast('Your head barely moved during the second pass — the model cannot correct for head movement. Calibrate again and move your head around.');
+          + ` · ${p.usable ? 'usable' : 'TOO LOOSE'}`;
         // Persist the fresh terrain immediately — he should never re-teach the app his own eyes.
         scheduleGazeSave();
         fetch('/api/gazelog', {
@@ -798,11 +795,6 @@ async function startGaze() {
           : `Up and down is good, but left and right is too loose. Try again.`;
         toast(msg);
         say(msg, { instant: true, keep: true });
-        fetch('/api/gazelog', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ kind: 'calibration', ...p,
-            screen: { w: window.innerWidth, h: window.innerHeight }, probe: gaze?.probe() }),
-        }).catch(() => {});
         return;
       }
       $('#calib').hidden = false;
@@ -1268,7 +1260,7 @@ $('#calibrate').onclick = async () => {
     : undefined;
 
   calibPhase2 = false;
-  say('Follow the dot with your eyes. Keep your head still for now.', { instant: true, keep: true });
+  say('Look at each dot, then follow the moving one with your eyes.', { instant: true, keep: true });
   try {
     await gaze.calibrate({ bounds, onSample: (n) => { $('#calib-count').textContent = `${n} samples`; } });
   } catch (e) {
