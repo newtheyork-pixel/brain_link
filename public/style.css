@@ -224,7 +224,9 @@ button.listen.hearing { background: rgba(91,141,239,.22); }
   box-shadow: 0 0 0 6px rgba(91,141,239,.45); }
 .tile.target::after { content: "look here"; position: absolute; bottom: 8px; left: 0; right: 0;
   text-align: center; font-size: 12px; font-weight: 650; color: var(--accent);
-  letter-spacing: .04em; text-transform: uppercase; }
+  letter-spacing: .04em; text-transform: uppercase;
+  /* A pinned tile's ::after is a 5px faded dot at the top. Undo that here, or the label is squeezed into it. */
+  top: auto; width: auto; height: auto; background: none; border-radius: 0; opacity: 1; }
 /* accuracy test progress, over the live grid; never in the way of a click */
 .test-chip { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); margin: 0;
   background: var(--surface); color: var(--ink); border: 1px solid var(--accent); border-radius: 10px;

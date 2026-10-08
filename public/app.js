@@ -1275,6 +1275,8 @@ function loadGazeMap() {
 async function signalCheck() {
   if (!gaze?.running) return toast('Turn the camera on first.');
   if (gaze.calibrating) return toast('Calibration is running. Press Escape to stop it.');
+  // Never on top of the accuracy test or a recenter: two flows would share the one overlay.
+  if (gazeTesting || !$('#calib').hidden) return;
   // This camera, held for the whole check: if it stops, the check stops, instead of reading a
   // module-level gaze that is now null and leaving the overlay up until a reload.
   const g = gaze;
@@ -1335,7 +1337,9 @@ async function runSignalCheck(g, live) {
   // Up and down too. That is the axis that fails (the calibration verdict says so most often),
   // and a check that only looked left and right said "good" while it was failing.
   const top    = await step('Now the dot at the top.',                   0.5, 0.05, 1200, 1300);
-  const bottom = await step('Now the dot at the bottom.',                0.5, 0.95, 1200, 1300);
+  // 0.88, not the very edge: looking far down droops the lids, those frames read as blinks and are
+  // dropped, and a good camera came out as "could not see your face". Calibration stops at 0.86.
+  const bottom = await step('Now the dot at the bottom.',                0.5, 0.88, 1200, 1300);
 
   $('#calib').hidden = true;
 
@@ -1823,7 +1827,7 @@ $('#test-gaze').onclick = testGazeAccuracy;
 $('#signal-check').onclick = signalCheck;
 $('#recenter').onclick = async () => {
   if (!gaze?.calibrated) return toast('Calibrate first.');
-  if (gaze.calibrating || gazeTesting) return;
+  if (gaze.calibrating || gazeTesting || !$('#calib').hidden) return;   // not over the signal check
   const g = gaze;
   const live = overlayGuard(g);
   clearScreen();

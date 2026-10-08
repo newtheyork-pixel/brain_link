@@ -275,8 +275,12 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
   /** Was this map made on the camera that is open now? A different lens or aspect moves every feature. */
   function sameCamera(f) {
     const c = f?.cam;
-    if (c?.id && camera?.id) { if (c.id !== camera.id) return false; }
-    else if (c?.label && camera?.label && c.label !== camera.label) return false;
+    // Either the id or the label matching is enough. Some browsers hand out a new deviceId after a
+    // permission or site-data reset, and the same camera was then refused. Refuse only when every
+    // name both sides have disagrees.
+    const idSays = c?.id && camera?.id ? c.id === camera.id : null;
+    const labelSays = c?.label && camera?.label ? c.label === camera.label : null;
+    if ((idSays === false && labelSays !== true) || (labelSays === false && idSays !== true)) return false;
     if (f?.cw && f?.ch && camera?.w && camera?.h && Math.abs(f.cw / f.ch - camera.w / camera.h) > 0.02) return false;
     return true;
   }
@@ -622,16 +626,18 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
 
         const t = document.querySelector('.tile')?.getBoundingClientRect();
         const tileW = t?.width || W / 4, tileH = t?.height || H / 2;
-        const usable = cal.errX < tileW * 0.45 && cal.errY < tileH * 0.45;
+        // Not called `usable`: that name is the frame counter above, and a const here would shadow it
+        // for the whole try block, so the pursuit loop's onSample(usable) threw before this line ran.
+        const fitOk = cal.errX < tileW * 0.45 && cal.errY < tileH * 0.45;
 
         // A LOOSE FIT NEVER REPLACES A WORKING ONE. He recalibrates while slumped, the fit comes out
         // too loose, and the map he has been using all week used to be gone, in memory and on disk 4 s
         // later. Keep the old one. With no map at all a loose one beats none, but it is marked loose
         // so it is never saved over a map on disk.
-        const kept = !usable && !!model && !fit?.loose;
+        const kept = !fitOk && !!model && !fit?.loose;
         if (!kept) {
           fit = { ref, lidBasis, lambda: cal.lambda, lag: cal.lag, cw, ch, errX: cal.errX, errY: cal.errY,
-            origin, cam: { id: camera?.id ?? '', label: camera?.label ?? '' }, loose: !usable };
+            origin, cam: { id: camera?.id ?? '', label: camera?.label ?? '' }, loose: !fitOk };
           model = cal.model;
           terrain = cal.samples.map((p) => ({ f: p.f, x: p.x, y: p.y }));
           sinceRefit = 0;
@@ -643,7 +649,7 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace
 
         onCalibrationProgress({
           state: 'done', errorPx: cal.stillErrPx, errX: cal.errX, errY: cal.errY,
-          usable, kept, backend,
+          usable: fitOk, kept, backend,
           variant: `linear · delay ${cal.lag}ms · λ${cal.lambda}`, lag: cal.lag, lambda: cal.lambda,
           samples: still.length + moving.length, nStill: still.length, nMoving: moving.length,
           tile: { w: Math.round(tileW), h: Math.round(tileH) },
