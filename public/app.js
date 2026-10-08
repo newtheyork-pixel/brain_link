@@ -1241,6 +1241,20 @@ async function startGaze() {
     onError: (msg, { fatal = true } = {}) => { toast(msg); if (fatal && gaze === g) gazeStopped(); },
     onRecovered: () => toast('Camera back. Eye tracking is on again.', 'ok'),
     onCalibrationProgress: (p) => {
+      if (p.state === 'checkin-done') {
+        $('#calib').hidden = true;
+        $('#calib-bar').hidden = true;
+        $('#gaze-state').textContent = `Quick check: was off by ${p.before}px, now ${p.after}px · tile ${p.tile.w}x${p.tile.h} · ${p.samples} samples`;
+        if (p.good) scheduleGazeSave();
+        fetch('/api/gazelog', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'checkin', ...p, screen: { w: window.innerWidth, h: window.innerHeight } }),
+        }).catch(() => {});
+        const msg = p.good ? 'Eyes checked. Ready.' : 'Still off after the quick check. Calibrate again.';
+        toast(msg, p.good ? 'ok' : 'error');
+        speakPrompt(msg);
+        return;
+      }
       if (p.state === 'done') {
         $('#calib').hidden = true;
         // The leave-one-out error, against half a tile. Anything worse and the wrong word gets
@@ -1323,7 +1337,9 @@ async function startGaze() {
   const saved = loadGazeMap();
   if (saved && g.import(saved)) {
     $('#gaze-state').textContent = `Camera on (${g.backend}) — remembered your eyes (${g.terrainSize} samples). Recenter if the dot is off.`;
-    toast('Welcome back — your eye calibration was remembered.', 'ok');
+    toast('Welcome back. Your eye calibration was remembered. Quick check first.', 'ok');
+    // Eyes mode only: the Blinks driver does not use the gaze point at all.
+    if (state.driver === 'gaze') setTimeout(() => { if (gaze === g && g.running && !g.calibrating) runCheckIn(); }, 1200);
   } else if (saved && g.importProblem === 'camera' && state.driver !== 'blink') {
     // Not loaded, and not deleted: until he calibrates this camera, plugging the old one back in
     // brings its map back.
@@ -1888,21 +1904,7 @@ $('#calibrate').onclick = async () => {
   clearScreen();
   await new Promise((r) => setTimeout(r, 350));   // let the panel finish getting out of the way
 
-  // Calibrate across the area he will actually USE — the tiles — not the corners of the glass,
-  // where the eyelid swallows the iris and the readings are lies.
-  // The action row (Say it, Urgent, Undo...) is a gaze target too, so the bottom dots reach into
-  // its upper half. Not to its bottom edge: that is the glass corner the comment above warns about.
-  const tiles = $$('.tile').map((el) => el.getBoundingClientRect());
-  const bar = $('.actions').getBoundingClientRect();
-  const bottom = Math.max(Math.max(...tiles.map((r) => r.bottom)) - 30, bar.height ? bar.top + bar.height * 0.4 : 0);
-  const bounds = tiles.length
-    ? {
-        x0: Math.max(0.06, (Math.min(...tiles.map((r) => r.left)) + 40) / window.innerWidth),
-        x1: Math.min(0.94, (Math.max(...tiles.map((r) => r.right)) - 40) / window.innerWidth),
-        y0: Math.max(0.10, (Math.min(...tiles.map((r) => r.top)) + 30) / window.innerHeight),
-        y1: Math.min(0.93, bottom / window.innerHeight),
-      }
-    : undefined;
+  const bounds = calibBounds();
 
   pursuitCued = false;
   speakPrompt('Look at each dot, then follow the moving one with your eyes.');
@@ -1921,6 +1923,45 @@ $('#calibrate').onclick = async () => {
     endCalibrationUI();
   }
 };
+
+/** The area the dots cover: the tiles and the top of the action row, never the glass corners. */
+function calibBounds() {
+  // Calibrate across the area he will actually USE — the tiles — not the corners of the glass,
+  // where the eyelid swallows the iris and the readings are lies.
+  // The action row (Say it, Urgent, Undo...) is a gaze target too, so the bottom dots reach into
+  // its upper half. Not to its bottom edge: that is the glass corner the comment above warns about.
+  const tiles = $$('.tile').map((el) => el.getBoundingClientRect());
+  const bar = $('.actions').getBoundingClientRect();
+  const bottom = Math.max(Math.max(...tiles.map((r) => r.bottom)) - 30, bar.height ? bar.top + bar.height * 0.4 : 0);
+  return tiles.length
+    ? {
+        x0: Math.max(0.06, (Math.min(...tiles.map((r) => r.left)) + 40) / window.innerWidth),
+        x1: Math.min(0.94, (Math.max(...tiles.map((r) => r.right)) - 40) / window.innerWidth),
+        y0: Math.max(0.10, (Math.min(...tiles.map((r) => r.top)) + 30) / window.innerHeight),
+        y1: Math.min(0.93, bottom / window.innerHeight),
+      }
+    : undefined;
+}
+
+
+/**
+ * QUICK CHECK. A saved map is a little off in a new session; five dots and ~7 s adapt it to today
+ * instead of a full calibration (gaze.js checkIn).
+ */
+async function runCheckIn() {
+  if (!gaze?.running || !gaze.calibrated) return toast('Calibrate first.');
+  if (gaze.calibrating || gazeTesting) return;
+  clearScreen();
+  await new Promise((r) => setTimeout(r, 350));
+  speakPrompt('Quick check. Look at each dot.');
+  try {
+    await gaze.checkIn({ bounds: calibBounds() });
+  } catch (e) {
+    if (String(e.message) !== 'cancelled') toast(`Quick check failed: ${e.message}`);
+  } finally {
+    endCalibrationUI();
+  }
+}
 
 /** Always get him off the calibration screen. No failure mode leaves him staring at black. */
 function endCalibrationUI() {
@@ -1942,6 +1983,7 @@ window.addEventListener('keydown', (e) => {
   else if (!$('#calib').hidden) endCalibrationUI();
 });
 $('#test-gaze').onclick = testGazeAccuracy;
+$('#checkin').onclick = runCheckIn;
 $('#signal-check').onclick = signalCheck;
 $('#recenter').onclick = async () => {
   if (!gaze?.calibrated) return toast('Calibrate first.');

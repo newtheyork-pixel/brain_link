@@ -249,10 +249,11 @@ export function makeMedian(n = 7) {
  * The lock is what makes the thing usable: a target that trembles under your gaze can never be
  * dwelled on, because every tremor resets the dwell.
  */
-export function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {}) {
+export function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120, breakMs = 0 } = {}) {
   let px = null, py = null;        // reported position
   let lx = 0, ly = 0;              // last raw
   let stillSince = 0, locked = false;
+  let outSince = -1;               // when the point first left the lock radius (for breakMs)
 
   return (x, y, now) => {
     if (px === null) { px = x; py = y; lx = x; ly = y; stillSince = now; return [px, py, false]; }
@@ -261,9 +262,13 @@ export function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 
     lx = x; ly = y;
 
     if (locked) {
-      // Only break the lock on a real, sustained move — not on jitter.
-      if (Math.hypot(x - px, y - py) > moveThresh) { locked = false; stillSince = now; }
-      else return [px, py, true];
+      // Only break the lock on a real, SUSTAINED move: out of the radius for breakMs, not one noisy
+      // frame. A saccade to another tile stays out; a noise spike comes straight back.
+      if (Math.hypot(x - px, y - py) > moveThresh) {
+        if (outSince < 0) outSince = now;
+        if (now - outSince >= breakMs) { locked = false; stillSince = now; outSince = -1; }
+        else return [px, py, true];
+      } else { outSince = -1; return [px, py, true]; }
     }
 
     // Not locked: track, but heavily damped so it doesn't skate.

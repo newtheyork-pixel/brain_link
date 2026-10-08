@@ -185,7 +185,7 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
     if (!fit || terrain.length < 100) return false;
     const X = [], Y = [];
     for (const s of terrain) {
-      const k = s.id ? LEARN_WEIGHT : 1;
+      const k = s.w ?? (s.id ? LEARN_WEIGHT : 1);
       for (let j = 0; j < k; j++) { X.push(s.f); Y.push([s.x, s.y]); }
     }
     const next = fitRidge(X, Y, fit.lambda);
@@ -200,7 +200,17 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
   const modelFeatures = (lm) => featureVector(rawFeatures(lm, fit.cw, fit.ch, fit.ref), fit.lidBasis);
   let collector = null;                   // calibration sink: every camera frame, timestamped
   let median = makeMedian();
-  let fixate = makeFixation();
+  // The lock radius scales with the TILE, not fixed pixels. Measured on the 2026-10-08 recording
+  // (eval/gaze/jitter.mjs): a 55 px radius broke 12 times per 10 s of holding still on a big screen
+  // and the dot was steady 82% of the time; a third of the tile's short side, held broken for
+  // 60 ms, broke 2.4 times, steady 96%, with the same tile accuracy and no slower to follow a jump.
+  const fixOpts = () => {
+    const t = document.querySelector('.tile')?.getBoundingClientRect();
+    const side = t?.width && t?.height ? Math.min(t.width, t.height) : Math.min(window.innerWidth / 4, window.innerHeight / 2);
+    const r = Math.max(55, 0.32 * side);
+    return { moveThresh: r, holdThresh: 0.55 * r, breakMs: 60 };
+  };
+  let fixate = makeFixation(fixOpts());
   let lastTs = -1;
 
   // THE BLINK GATE. From the first frame the lids start to move until they are back where they
@@ -341,7 +351,7 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
         attach(s, v);
         lastF = null; fsm = null;
         median = makeMedian();
-        fixate = makeFixation();
+        fixate = makeFixation(fixOpts());
         detectFails = 0;
         lastFrameAt = performance.now();
         recovering = false;
@@ -648,7 +658,7 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
           bias = { x: 0, y: 0 };
           lastF = null; lastOut = null; preBlink = null;
           median = makeMedian();
-          fixate = makeFixation();
+          fixate = makeFixation(fixOpts());
         }
 
         onCalibrationProgress({
@@ -669,6 +679,95 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
 
     get calibrating() { return calibrating; },
     cancelCalibration() { cancelled = true; },
+
+    /**
+     * CHECK-IN: the saved map, adapted to today in ~7 s instead of a full minute's calibration.
+     *
+     * A restored map is a little off in a new session (he sits differently, the light changed), and
+     * he was recalibrating every time. Measured on the recording (eval/gaze/refresh.mjs, posture
+     * blocks standing in for new sessions): the saved map alone 16/25 looks on the right tile, a
+     * plain shift from the same dots 16/25, keeping every saved sample and adding 5 fresh dots
+     * weighted heavily 20/25. So: five still dots, then that refit. Older check-ins drop to normal
+     * weight, so only today's posture is emphasised.
+     */
+    async checkIn({ bounds } = {}) {
+      if (!running || calibrating || !model || !fit) return null;
+      calibrating = true;
+      cancelled = false;
+      const frames = [];
+      collector = (fr) => frames.push(fr);
+      try {
+        const B = bounds ?? { x0: 0.10, x1: 0.90, y0: 0.16, y1: 0.86 };
+        const W = window.innerWidth, H = window.innerHeight;
+        const lerp = (a, b, t) => a + (b - a) * t;
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const check = () => {
+          if (cancelled) throw new Error('cancelled');
+          if (!running || recovering) throw new Error('the camera dropped out. Try again when it is back.');
+        };
+        const dots = [[0.5, 0.5], [0, 0], [1, 0], [1, 1], [0, 1]].map(([fx, fy]) => [lerp(B.x0, B.x1, fx), lerp(B.y0, B.y1, fy)]);
+        const wins = [];
+        for (let i = 0; i < dots.length; i++) {
+          check();
+          const [x, y] = dots[i];
+          onCalibrationProgress({ state: 'point', checkIn: true, x, y, index: i, total: dots.length });
+          await sleep(550);
+          check();
+          onCalibrationProgress({ state: 'sampling', checkIn: true, x, y, index: i, total: dots.length });
+          const t0 = performance.now();
+          await sleep(950);
+          wins.push({ t0, t1: performance.now(), x: x * W, y: y * H });
+        }
+        collector = null;
+
+        // Labels in calibration-time page pixels, like learn(): the page may have moved since.
+        const sh = pageShift();
+        const fresh = [];
+        for (const w of wins) {
+          for (const fr of frames) {
+            if (fr.t < w.t0 || fr.t > w.t1 || fr.gated || fr.lid >= BLINK_ON) continue;
+            fresh.push({ f: modelFeatures(fr.lm), x: w.x - sh.x, y: w.y - sh.y, dot: w });
+          }
+        }
+        if (fresh.length < 60 || new Set(fresh.map((p) => p.dot)).size < 4) {
+          throw new Error('your face was not visible enough. More light, sit closer.');
+        }
+        // How far off each dot is, as the dot would be shown: median over the dot, bias included.
+        const offBy = (predict) => {
+          const per = wins.map((w) => {
+            const g = fresh.filter((p) => p.dot === w);
+            if (!g.length) return null;
+            const P = g.map((p) => predict(p.f));
+            const mid = (k) => P.map((q) => q[k]).sort((a, b) => a - b)[Math.floor(P.length / 2)];
+            return Math.hypot(mid(0) - g[0].x, mid(1) - g[0].y);
+          }).filter((v) => v !== null);
+          return Math.round(per.reduce((a, b) => a + b, 0) / per.length);
+        };
+        const before = offBy((f) => { const [x, y] = model.predict(f); return [x + bias.x, y + bias.y]; });
+
+        for (const s2 of terrain) if (s2.checkIn) { delete s2.checkIn; s2.w = 1; }
+        const CHECKIN_WEIGHT = 40;
+        for (const p of fresh) terrain.push({ f: p.f, x: p.x, y: p.y, w: CHECKIN_WEIGHT, checkIn: true });
+        while (terrain.length > TERRAIN_CAP) terrain.shift();
+        const prevModel = model, prevBias = bias;
+        bias = { x: 0, y: 0 };
+        if (!rebuild()) { model = prevModel; bias = prevBias; throw new Error('the update did not fit. Calibrate instead.'); }
+        const after = offBy((f) => model.predict(f));
+        lastF = null; lastOut = null; preBlink = null;
+        median = makeMedian();
+        fixate = makeFixation(fixOpts());
+
+        const t = document.querySelector('.tile')?.getBoundingClientRect();
+        const side = Math.min(t?.width || W / 4, t?.height || H / 2);
+        const result = { state: 'checkin-done', before, after, samples: fresh.length, good: after < side * 0.45,
+          tile: { w: Math.round(t?.width || W / 4), h: Math.round(t?.height || H / 2) } };
+        onCalibrationProgress(result);
+        return result;
+      } finally {
+        collector = null;
+        calibrating = false;
+      }
+    },
 
     /**
      * LEARN FROM A REAL SELECTION. He dwelled inside a tile and confirmed it, so his gaze WAS at
@@ -736,7 +835,7 @@ export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onLids
       bias = { x: Number.isFinite(b.x) ? b.x : 0, y: Number.isFinite(b.y) ? b.y : 0 };
       lastF = null; lastOut = null; preBlink = null;
       median = makeMedian();
-      fixate = makeFixation();
+      fixate = makeFixation(fixOpts());
       return rebuild();
     },
     get terrainSize() { return terrain.length; },
