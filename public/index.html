@@ -55,7 +55,7 @@
 <div id="confirm" class="sheet" hidden>
   <h2>Say which one?</h2>
   <p class="sheet-note">Nothing is spoken until you pick.</p>
-  <p id="sheet-hint" class="sheet-hint" hidden>Look and hold to say it &middot; or blink to move, hold your eyes shut to say it.</p>
+  <p id="sheet-hint" class="sheet-hint" hidden>Look at one, then close your eyes until the beep to say it.</p>
   <div id="candidates" class="candidates"></div>
   <button id="cancel" class="ghost">Back</button>
 </div>
@@ -90,13 +90,17 @@
   <label class="row" id="confirm-row" hidden>
     <span><b>Confirm by</b><em>How he says the word he is looking at.</em></span>
     <select id="confirm-by">
-      <option value="blink">Blink (look, then blink)</option>
+      <option value="blink">Blink (look, then close eyes until the beep)</option>
       <option value="dwell">Dwell (look and hold)</option>
     </select>
   </label>
   <label class="row">
     <span><b>Dwell time</b><em id="dwell-label">Hold a tile for 0.9s to pick it.</em></span>
     <input type="range" id="dwell" min="400" max="2500" step="100" value="900">
+  </label>
+  <label class="row">
+    <span><b>Blink length</b><em id="blink-label">Close your eyes for 0.35s (until the beep) to say a word.</em></span>
+    <input type="range" id="blink-ms" min="250" max="1200" step="50" value="350">
   </label>
   <p class="who"><span id="who-name">—</span> · <span id="voice-state">placeholder voice</span></p>
   <p class="hud"><b id="m-sel">0</b> selections · <b id="m-time">0.0</b>s · <span id="m-src"></span></p>
@@ -124,7 +128,7 @@
 </div>
 
 <div id="blink-help" class="scan-help" hidden>
-  Blink to move to the next word &middot; hold your eyes shut to pick it
+  Blink to move to the next word &middot; close your eyes until the beep to pick it
 </div>
 
 <div id="scan-help" class="scan-help" hidden>

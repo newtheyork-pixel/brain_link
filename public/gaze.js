@@ -13,23 +13,19 @@
 
 import { FaceLandmarker, FilesetResolver } from '/vendor/vision_bundle.mjs';
 import { RIGID, LEFT_EYE, RIGHT_EYE, makeReference, rawFeatures, makeLidBasis, featureVector,
-  fitCalibration, fitRidge } from '/gazemodel.js';
+  fitCalibration, fitRidge, makeMedian, makeFixation } from '/gazemodel.js';
+import { makeBlinkGate, BLINK_DEFAULTS } from '/blinkgate.js';
 
 // Only these landmarks feed the model; calibration keeps copies of just these, not all 478.
 const NEED = [...new Set([...RIGID, ...LEFT_EYE, ...RIGHT_EYE, 468, 469, 470, 471, 472, 473, 474, 475, 476, 477])];
 const keepLm = (lm) => { const o = []; for (const i of NEED) o[i] = { x: lm[i].x, y: lm[i].y, z: lm[i].z }; return o; };
 
-const BLINK_ON = 0.6;              // lid counts as SHUT above this...
-const BLINK_OFF = 0.45;            // ...and OPEN again only below this (hysteresis: a one-frame
-                                  // dip must not split one blink into two)
-// Two deliberate-blink lengths, so blinks can both NAVIGATE and CONFIRM:
-//   short  (a quick, decided blink)  -> move to the next option
-//   long   (eyes held shut a beat)   -> say the highlighted option
-// Reflex blinks are ~100-150ms; we ignore anything below SHORT_MIN. Anything past LONG_MAX is a
-// rest, not a command.
-const BLINK_SHORT_MIN = 120, BLINK_SHORT_MAX = 450;
-const BLINK_LONG_MIN = 550, BLINK_LONG_MAX = 1600;
-
+// Blinks are judged in blinkgate.js: when the lids start to move (gaze freezes), when both eyes
+// count as shut, and how long. Two deliberate-blink lengths, so blinks can both NAVIGATE and CONFIRM:
+//   short  (a quick, decided blink)        -> move to the next option
+//   long   (eyes held shut >= confirmMs)   -> say the highlighted option
+// Natural blinks on the 2026-10-08 recording measured 83-292 ms shut; confirmMs defaults to 350.
+const BLINK_ON = 0.6;              // calibration and recenter still drop any frame this closed
 // The iris landmarks. This model returns 478 points, and the last ten are the two irises —
 // the actual dark circles of his eyes, tracked directly.
 const IRIS_L = 468, IRIS_R = 473;
@@ -124,73 +120,15 @@ function features(lm, face, matrix) {
   const nx = nose.x - 0.5, ny = nose.y - 0.5;
   const sc = Math.log(len3(sub(P(L_OUT), P(R_OUT))) || 1e-6);
 
-  const lid = Math.max(b.eyeBlinkLeft ?? 0, b.eyeBlinkRight ?? 0);
-  const bothShut = (b.eyeBlinkLeft ?? 0) > BLINK_ON && (b.eyeBlinkRight ?? 0) > BLINK_ON;
-  const bothOpen = (b.eyeBlinkLeft ?? 0) < BLINK_OFF && (b.eyeBlinkRight ?? 0) < BLINK_OFF;
-
-  return { v: [ix, iy, yaw, pitch, ap, nx, ny, sc], lid, bothShut, bothOpen };
+  const lidL = b.eyeBlinkLeft ?? 0, lidR = b.eyeBlinkRight ?? 0;
+  return { v: [ix, iy, yaw, pitch, ap, nx, ny, sc], lid: Math.max(lidL, lidR), L: lidL, R: lidR };
 }
 
-/**
- * THE OUTPUT STAGE. This is where "it just moves forever" was coming from.
- *
- * I was treating gaze like a mouse cursor: take the model's estimate every frame and glide the
- * dot toward it. But an eye does not glide. It JUMPS and then HOLDS (saccade, then fixation).
- * Chasing a per-frame estimate produces a dot that drifts forever and never settles on anything
- * — which is exactly what it did.
- *
- * So: reject the outliers, detect when the eye has actually LANDED, and freeze while it holds.
- */
+// THE OUTPUT STAGE (median + fixation lock) lives in gazemodel.js, so the offline blink replay
+// (eval/gaze/blink.mjs) runs the same code the cursor does.
 
-/** Median of the last N — kills the single-frame spikes a mean would smear across the screen. */
-function makeMedian(n = 7) {
-  const bx = [], by = [];
-  const mid = (a) => [...a].sort((p, q) => p - q)[Math.floor(a.length / 2)];
-  return (x, y) => {
-    bx.push(x); by.push(y);
-    if (bx.length > n) { bx.shift(); by.shift(); }
-    return [mid(bx), mid(by)];
-  };
-}
-
-/**
- * Fixation detector. While the eye is moving, follow it fast. The moment it settles, LOCK —
- * and keep the dot dead still until it genuinely moves again.
- *
- * The lock is what makes the thing usable: a target that trembles under your gaze can never be
- * dwelled on, because every tremor resets the dwell.
- */
-function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {}) {
-  let px = null, py = null;        // reported position
-  let lx = 0, ly = 0;              // last raw
-  let stillSince = 0, locked = false;
-
-  return (x, y, now) => {
-    if (px === null) { px = x; py = y; lx = x; ly = y; stillSince = now; return [px, py, false]; }
-
-    const step = Math.hypot(x - lx, y - ly);
-    lx = x; ly = y;
-
-    if (locked) {
-      // Only break the lock on a real, sustained move — not on jitter.
-      if (Math.hypot(x - px, y - py) > moveThresh) { locked = false; stillSince = now; }
-      else return [px, py, true];
-    }
-
-    // Not locked: track, but heavily damped so it doesn't skate.
-    px += 0.35 * (x - px);
-    py += 0.35 * (y - py);
-
-    if (step < holdThresh) {
-      if (now - stillSince > settleMs) { locked = true; px = x; py = y; }
-    } else {
-      stillSince = now;
-    }
-    return [px, py, locked];
-  };
-}
-
-export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProgress }) {
+export function createGaze({ onGaze, onBlink, onBlinkHeld, onLidsClosing, onFace, onError,
+  onCalibrationProgress, confirmMs = BLINK_DEFAULTS.confirmMs }) {
   let landmarker = null, video = null, stream = null, backend = '?';
   let camera = null, irisPx = 0;
   let running = false, calibrating = false, cancelled = false;
@@ -207,6 +145,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   const REFIT_EVERY = 10;                 // refit after this many real selections
   const LEARN_WEIGHT = 20;
   let sinceRefit = 0, learnId = 0;
+  let fitThroughId = 0;                   // learned rows up to this id are in the current model
 
   function rebuild() {
     if (!fit || terrain.length < 100) return false;
@@ -230,7 +169,14 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
   let fixate = makeFixation();
   let lastTs = -1;
 
-  let blinkStart = 0, lidWasShut = false;
+  // THE BLINK GATE. From the first frame the lids start to move until they are back where they
+  // were, no frame reaches lastF, the median, the fixation lock or onGaze. preBlink is what the
+  // tracker knew just before: the smoothed features and the point he was looking at. On release we
+  // restore it, so the dot does not jump a row after every blink, and a blink-confirmed selection
+  // learns from his open eye, not from a closing lid.
+  const gate = makeBlinkGate({ confirmMs });
+  let preBlink = null;        // { f, x, y, mx, my, locked, at }
+  let lastOut = null;         // the last point handed to onGaze, with its median
 
   // SMOOTH THE FEATURES, NOT JUST THE OUTPUT.
   //
@@ -321,7 +267,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     const face = out.faceBlendshapes?.[0]?.categories;
     const lm = out.faceLandmarks?.[0];
     // 478 landmarks means the iris points are there. 468 means they are not, and gaze is dead.
-    if (!face?.length || !lm || lm.length < 478) { onFace(false); return; }
+    if (!face?.length || !lm || lm.length < 478) { gate.reset(); preBlink = null; onFace(false); return; }
     onFace(true);
 
     // How many pixels wide is the iris, really? Below ~12 the landmark cannot resolve where it
@@ -336,27 +282,37 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     trackNoise(fRaw.v);
     const f = { ...fRaw, v: smoothFeatures(fRaw.v) };
 
-    // Classify the blink by how long the lids stayed shut. Hysteresis: the lids count as shut above
-    // 0.6 and are only "open again" below 0.45 — a single mid-blink dip can't split one blink into
-    // two (which used to fire an early commit or a double step).
-    if (f.bothShut && !lidWasShut) { lidWasShut = true; blinkStart = performance.now(); }
-    else if (f.bothOpen && lidWasShut) {
-      lidWasShut = false;
-      const held = performance.now() - blinkStart;
-      if (held >= BLINK_SHORT_MIN && held <= BLINK_SHORT_MAX) onBlink('short', held);
-      else if (held >= BLINK_LONG_MIN && held <= BLINK_LONG_MAX) onBlink('long', held);
+    // The lids, both eyes, against his own open level (blinkgate.js). The snapshot is taken BEFORE
+    // onLidsClosing, so the app reads the point from before the lids moved.
+    const g = gate.step(lastFrameAt, f.L, f.R);
+    if (g.entered) {
+      // Only a point from the last few frames counts: one from before a face loss is stale.
+      preBlink = lastOut && lastF && lastFrameAt - lastOut.t < 200
+        ? { ...lastOut, f: [...lastF], at: lastFrameAt } : null;
+      onLidsClosing?.();
+    }
+    for (const e of g.events) {
+      if (e.type === 'held') onBlinkHeld?.(e.held);
+      else onBlink(e.kind, e.held);
     }
 
     // Calibration takes EVERY frame, stamped with when it was seen — the moving-dot labels are
     // matched to the dot's position a measured delay earlier, so the time has to be exact.
-    if (collector) collector({ lm: keepLm(lm), t: lastFrameAt, lid: fRaw.lid });
+    if (collector) collector({ lm: keepLm(lm), t: lastFrameAt, lid: fRaw.lid, gated: g.gated });
 
     if (!model) return;
 
-    // Eyes shut: hold the last position. Otherwise the cursor lurches away every blink.
-    if (f.lid > BLINK_ON) return;
+    // Lids moving: hold everything still. Otherwise the cursor lurches away every blink, and the
+    // lurch un-arms the very tile the blink was meant to say.
+    if (g.gated) return;
 
     const fv = modelFeatures(lm);
+    if (preBlink) {
+      // First frame after a blink: carry on from the open-eye state, not from half-closed lids.
+      lastF = preBlink.f;
+      median.fill(preBlink.mx, preBlink.my);
+      preBlink = null;
+    }
     lastF = lastF ? lastF.map((v, k) => v + 0.30 * (fv[k] - v)) : fv;   // steady BEFORE the model
     const [px0, py0] = model.predict(lastF);
     const rx = Math.max(0, Math.min(window.innerWidth, px0 + bias.x));
@@ -366,6 +322,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     const [mx, my] = median(rx, ry);
     const [x, y, locked] = fixate(mx, my, now);
 
+    lastOut = { x, y, mx, my, locked, t: lastFrameAt };
     lastSample = { x, y, locked, raw: f.v.map((n) => +n.toFixed(3)) };
     onGaze(x, y, locked);
   }
@@ -496,7 +453,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         }
         collector = null;
 
-        const ok = (fr) => fr.lid < BLINK_ON;
+        const ok = (fr) => !fr.gated && fr.lid < BLINK_ON;   // no frame with the lids moving
         const still = [];
         for (const w of stillWin) {
           for (const fr of frames) if (fr.t >= w.t0 && fr.t <= w.t1 && ok(fr)) still.push({ fr, x: w.x, y: w.y });
@@ -530,7 +487,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
         terrain = cal.samples.map((p) => ({ f: p.f, x: p.x, y: p.y }));
         sinceRefit = 0;
         bias = { x: 0, y: 0 };
-        lastF = null;
+        lastF = null; lastOut = null; preBlink = null;
         median = makeMedian();
         fixate = makeFixation();
 
@@ -563,12 +520,15 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
      * Returns an id so the caller can RETRACT this sample if he immediately undoes the word — a
      * mis-selection he corrects is a poisoned label, and learning from it would make the map worse.
      */
-    learn(_legacy, screenX, screenY) {
-      if (!model || !lastF) return null;
+    learn(feats, screenX, screenY) {
+      // feats: the features to label, when the caller has better ones than "now". A blink commit
+      // passes the pre-blink snapshot, because by the time the blink is over lastF is the reopen.
+      const f = feats ?? lastF;
+      if (!model || !f) return null;
       const id = ++learnId;
-      terrain.push({ f: [...lastF], x: screenX, y: screenY, id });
+      terrain.push({ f: [...f], x: screenX, y: screenY, id });
       if (terrain.length > TERRAIN_CAP) terrain.shift();
-      if (++sinceRefit >= REFIT_EVERY) { sinceRefit = 0; rebuild(); }
+      if (++sinceRefit >= REFIT_EVERY) { sinceRefit = 0; fitThroughId = learnId; rebuild(); }
       return id;
     },
 
@@ -576,8 +536,18 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
     retract(id) {
       if (id == null) return;
       const i = terrain.findIndex((s) => s.id === id);
-      if (i >= 0) terrain.splice(i, 1);
+      if (i < 0) return;
+      terrain.splice(i, 1);
+      // Already baked into the current map? Then dropping the row is not enough: refit without it.
+      if (id <= fitThroughId) rebuild(); else sinceRefit = Math.max(0, sinceRefit - 1);
     },
+
+    /** What the tracker knew just before the lids started to move (valid from onLidsClosing). */
+    preBlink() { return preBlink ? { ...preBlink, f: [...preBlink.f] } : null; },
+
+    /** How long the eyes must stay shut to count as a deliberate "say it". */
+    get confirmMs() { return gate.confirmMs; },
+    set confirmMs(ms) { gate.confirmMs = ms; },
 
     /** Persist / restore the calibration + terrain, so he never re-teaches the app his own eyes. */
     export() {
@@ -594,9 +564,10 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       fit = saved.fit;
       terrain = clean.slice(-TERRAIN_CAP).map((s) => ({ ...s, x: s.x * kx, y: s.y * ky }));
       learnId = terrain.reduce((m, s) => (s.id > m ? s.id : m), 0);
+      fitThroughId = learnId;               // import() refits on everything it loaded
       const b = saved.bias ?? { x: 0, y: 0 };
       bias = { x: (Number.isFinite(b.x) ? b.x : 0) * kx, y: (Number.isFinite(b.y) ? b.y : 0) * ky };
-      lastF = null;
+      lastF = null; lastOut = null; preBlink = null;
       median = makeMedian();
       fixate = makeFixation();
       return rebuild();
@@ -638,7 +609,7 @@ export function createGaze({ onGaze, onBlink, onFace, onError, onCalibrationProg
       bias = { x: 0, y: 0 };
       while (performance.now() < until) {
         await new Promise((r) => setTimeout(r, 40));
-        if (!lastF || lastLid > BLINK_ON) continue;
+        if (!lastF || lastLid > BLINK_ON || gate.gated) continue;
         got.push(model.predict(lastF));
       }
       if (got.length < 20) return false;

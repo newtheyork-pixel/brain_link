@@ -215,3 +215,66 @@ export function fitCalibration(still, moving, dotAt) {
   return { model, samples: all, lag: best.lag, lambda: best.lambda, stillErrPx: Math.round(best.e),
     errX: Math.round(ex / still.length), errY: Math.round(ey / still.length) };
 }
+
+/**
+ * THE OUTPUT STAGE. This is where "it just moves forever" was coming from.
+ *
+ * I was treating gaze like a mouse cursor: take the model's estimate every frame and glide the
+ * dot toward it. But an eye does not glide. It JUMPS and then HOLDS (saccade, then fixation).
+ * Chasing a per-frame estimate produces a dot that drifts forever and never settles on anything
+ * — which is exactly what it did.
+ *
+ * So: reject the outliers, detect when the eye has actually LANDED, and freeze while it holds.
+ */
+
+/** Median of the last N — kills the single-frame spikes a mean would smear across the screen. */
+export function makeMedian(n = 7) {
+  const bx = [], by = [];
+  const mid = (a) => [...a].sort((p, q) => p - q)[Math.floor(a.length / 2)];
+  const med = (x, y) => {
+    bx.push(x); by.push(y);
+    if (bx.length > n) { bx.shift(); by.shift(); }
+    return [mid(bx), mid(by)];
+  };
+  // After a blink: fill the window with the point from before the lids moved, so the next frames
+  // are judged against where he was looking, not against half-closed-lid frames.
+  med.fill = (x, y) => { bx.length = 0; by.length = 0; for (let i = 0; i < n; i++) { bx.push(x); by.push(y); } };
+  return med;
+}
+
+/**
+ * Fixation detector. While the eye is moving, follow it fast. The moment it settles, LOCK —
+ * and keep the dot dead still until it genuinely moves again.
+ *
+ * The lock is what makes the thing usable: a target that trembles under your gaze can never be
+ * dwelled on, because every tremor resets the dwell.
+ */
+export function makeFixation({ moveThresh = 55, holdThresh = 32, settleMs = 120 } = {}) {
+  let px = null, py = null;        // reported position
+  let lx = 0, ly = 0;              // last raw
+  let stillSince = 0, locked = false;
+
+  return (x, y, now) => {
+    if (px === null) { px = x; py = y; lx = x; ly = y; stillSince = now; return [px, py, false]; }
+
+    const step = Math.hypot(x - lx, y - ly);
+    lx = x; ly = y;
+
+    if (locked) {
+      // Only break the lock on a real, sustained move — not on jitter.
+      if (Math.hypot(x - px, y - py) > moveThresh) { locked = false; stillSince = now; }
+      else return [px, py, true];
+    }
+
+    // Not locked: track, but heavily damped so it doesn't skate.
+    px += 0.35 * (x - px);
+    py += 0.35 * (y - py);
+
+    if (step < holdThresh) {
+      if (now - stillSince > settleMs) { locked = true; px = x; py = y; }
+    } else {
+      stillSince = now;
+    }
+    return [px, py, locked];
+  };
+}
