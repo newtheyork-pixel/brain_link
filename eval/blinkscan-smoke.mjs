@@ -1,22 +1,28 @@
 // Guards the Blinks driver's rules (public/blinkscan.js). Run: node eval/blinkscan-smoke.mjs
 //   1. no natural blink (83-292 ms shut on the 2026-10-08 recording) ever selects, at any Blink
-//      length above that range, and an ordinary one (under 200 ms) never even steps at the
-//      default 350 ms or longer,
+//      length above that range; an ordinary one (under 200 ms) never even steps at the default
+//      350 ms or longer; and from 450 ms up no natural blink steps at all (the caregiver's fix
+//      when the long natural blinks move the highlight),
 //   2. there is always room to step: the step floor sits at least 100 ms under the Blink length,
 //   3. a fresh grid has nothing highlighted, and the first step lands on Urgent,
 //   4. a step visits every zone once per lap, in the urgent grid in plain order.
 import { blinkAction, stepMinMs, nextZone } from '../public/blinkscan.js';
+import { BLINK_DEFAULTS } from '../public/blinkgate.js';
 
 let fails = 0;
 const check = (ok, msg) => { if (!ok) { fails++; console.log(`FAIL ${msg}`); } };
-// What blinkgate.js calls a closure of this length, for this Blink length.
-const kindOf = (held, blinkMs) => held > 3000 ? 'rest' : held >= blinkMs ? 'long' : held >= 120 ? 'short' : 'reflex';
+// What blinkgate.js calls a closure of this length, for this Blink length (its own thresholds,
+// so this cannot drift from the gate).
+const { shortMin, restMs } = BLINK_DEFAULTS;
+const kindOf = (held, blinkMs) =>
+  held > restMs ? 'rest' : held >= blinkMs ? 'long' : held >= shortMin ? 'short' : 'reflex';
 
 for (let blinkMs = 250; blinkMs <= 1200; blinkMs += 50) {
   for (let held = 83; held <= 292; held += 1) {
     const a = blinkAction(kindOf(held, blinkMs), held, blinkMs);
     if (blinkMs > 292) check(a !== 'select', `natural ${held} ms selects at Blink length ${blinkMs}`);
-    if (blinkMs >= 300 && held < 200) check(a === null, `natural ${held} ms acts (${a}) at Blink length ${blinkMs}`);
+    if (blinkMs >= 350 && held < 200) check(a === null, `natural ${held} ms acts (${a}) at Blink length ${blinkMs}`);
+    if (blinkMs >= 450) check(a === null, `natural ${held} ms acts (${a}) at Blink length ${blinkMs}`);
   }
   check(blinkMs - stepMinMs(blinkMs) >= 100, `step window under 100 ms at Blink length ${blinkMs}`);
   check(blinkAction('short', blinkMs - 1, blinkMs) === 'step', `a firm short blink cannot step at ${blinkMs}`);

@@ -15,7 +15,7 @@
 
 import { createMic } from '/mic.js';
 import { createGaze } from '/gaze.js';
-import { blinkAction, nextZone } from '/blinkscan.js';
+import { blinkAction, nextZone, stepMinMs } from '/blinkscan.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -1542,6 +1542,7 @@ function syncSettingsRows() {
   // hold that never happened.
   $('#dwell-row').hidden = !(eyes && state.confirmBy === 'dwell');
   $('#blink-row').hidden = !(eyes || state.driver === 'blink');
+  showBlinkMs();   // the label says more in Blinks mode (the step length too)
 }
 
 // Confirm by: look then blink, or look and hold. Switching clears anything half-armed or half-filled,
@@ -1651,9 +1652,14 @@ $('#dwell').oninput = (e) => {
 showDwellMs();
 // Blink length: how long his eyes stay shut to say a word. Remembered on this device, because the
 // right value is a fact about him (how fast he can close and hold), not about one session.
+// In Blinks mode the same slider also sets how long a blink must be to move (blinkscan.js), and
+// the caregiver's only fix for natural blinks moving the highlight is to slide it up, so say so.
 function showBlinkMs() {
   $('#blink-ms').value = String(state.blinkMs);
-  $('#blink-label').textContent = `Close your eyes for ${(state.blinkMs / 1000).toFixed(2)}s (until the beep) to say a word.`;
+  const say = `Close your eyes for ${(state.blinkMs / 1000).toFixed(2)}s (until the beep) to say a word.`;
+  $('#blink-label').textContent = state.driver !== 'blink' ? say
+    : `${say} A blink of ${(stepMinMs(state.blinkMs) / 1000).toFixed(2)}s or more moves. ` +
+      'If the highlight moves by itself, slide this up (0.45s stops ordinary blinks).';
 }
 $('#blink-ms').oninput = (e) => {
   state.blinkMs = +e.target.value;

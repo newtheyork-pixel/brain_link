@@ -5,11 +5,14 @@
 // his own Blink length setting (state.blinkMs, the per-user "say it" threshold): 'long' is at least
 // that long, 'short' is anything from 120 ms up to it. 120 ms is still inside the natural range
 // (83-292 ms on the 2026-10-08 recording), so here a short blink only steps when it is clearly
-// longer than an ordinary one, and the floor follows his Blink length so a caregiver who shortens
-// it still leaves room between "step" and "say".
+// longer than an ordinary one. The floor sits 150 ms under his Blink length with no upper cap, so
+// one slider moves both. At the default 350 ms the floor is 200 ms, which still lets about 1 in 5
+// natural blinks step (the long ones measure 250-292 ms). A caregiver who sees the highlight move
+// by itself slides Blink length up: at 450 ms the floor is 300 ms, above every natural blink on
+// the recording. Shortening it still leaves room between "step" and "say".
 
-/** Shortest closure that steps the cursor, for his Blink length. Always >= 100 ms below it. */
-export const stepMinMs = (blinkMs) => Math.max(120, Math.min(200, blinkMs - 100));
+/** Shortest closure that steps the cursor, for his Blink length. Always >= 130 ms below it. */
+export const stepMinMs = (blinkMs) => Math.max(120, blinkMs - 150);
 
 /**
  * What a blink does in the Blinks driver: 'step', 'select', or null (a natural blink, or his eyes
